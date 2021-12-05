@@ -9,6 +9,8 @@ use async_net::unix::UnixListener;
 use std::cell::RefCell;
 use futures_lite::io::{AsyncWriteExt};
 
+use bg::sgraph::NodeIndex;
+
 #[derive(Clone, Debug)]
 enum Output {
     NotDone,
@@ -38,7 +40,7 @@ struct WorkItem {
     name: StoreName,
     command: (String, Vec<String>),
     log: Sender<String>,
-    nid: sgraph::NodeIndex,
+    nid: NodeIndex,
 }
 
 enum DoneDetMessage {
@@ -49,18 +51,18 @@ enum DoneDetMessage {
 
 enum MainMessage {
     Control {
-        inner: ControlMessage,
+        inner: ControlCommand,
     },
     Shutdown,
     Done {
-        nid: sgraph::NodeIndex,
+        nid: NodeIndex,
         det: DoneDetMessage,
     }
 }
 
 async fn handle_logging<T: futures_lite::io::AsyncRead>(log: Sender<String>, pipe: T) -> std::io::Result<()> {
     use futures_lite::io::AsyncBufReadExt;
-    for i in futures_lite::io::BufReader(pipe).lines() {
+    for i in futures_lite::io::BufReader::new(pipe).lines() {
         if log.send(i.await?).await.is_err() {
             break;
         }
@@ -69,12 +71,6 @@ async fn handle_logging<T: futures_lite::io::AsyncRead>(log: Sender<String>, pip
 
 fn main() {
     let pbar = indicatif::ProgressBar::new();
-
-    let mut runner = Runner {
-        graph: Graph::default(),
-        trgs: HashSet::new(),
-    };
-
     let base = yzix_core::StoreBase::Local("/tmp/yzix-store".into());
     let ex = yz_server_executor::ServerExecutor::new();
     let listener = UnixListener::bind("/tmp/yzix-srv").unwrap();
@@ -175,9 +171,10 @@ fn main() {
 
         use MainMessage as MM;
         while let Ok(x) = mains.recv() {
+            match x {
             MM::Shutdown => break,
             MM::Control { inner } => {
-                use ControlMessage as CM;
+                use ControlCommand as CM;
                 match inner {
                     CM::Schedule(graph2) => {
                         runner.schedule
@@ -203,6 +200,7 @@ fn main() {
                     },
                 }
             },
+            }
         }
     });
 }
