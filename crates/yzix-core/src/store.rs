@@ -123,12 +123,7 @@ impl fmt::Display for Path {
 /// sort-of emulation of NAR using CBOR
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum Dump {
-    Regular {
-        executable: bool,
-        contents: Vec<u8>,
-    },
-    SymLink {
-        target: Utf8PathBuf,
-    },
+    Regular { executable: bool, contents: Vec<u8> },
+    SymLink { target: Utf8PathBuf },
     Directory(std::collections::BTreeMap<String, Dump>),
 }

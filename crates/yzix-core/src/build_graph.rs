@@ -1,9 +1,9 @@
 use crate::{StoreHash, StoreName};
+pub use petgraph::stable_graph as sgraph;
 use petgraph::{visit::EdgeRef, Direction};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-pub use petgraph::stable_graph as sgraph;
 pub use sgraph::StableGraph as RawGraph;
+use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct InputName(String);
@@ -55,7 +55,13 @@ impl<T, U> std::cmp::PartialEq<Node<U>> for Node<T> {
 
 impl<T> Node<T> {
     pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Node<U> {
-        let Node { name, command, expect_hash, is_target, rest } = self;
+        let Node {
+            name,
+            command,
+            expect_hash,
+            is_target,
+            rest,
+        } = self;
         Node {
             name,
             command,
@@ -63,40 +69,6 @@ impl<T> Node<T> {
             is_target,
             rest: f(rest),
         }
-    }
-}
-
-// this trait allows us to abstract over RefCell / RwLock, etc...
-pub trait CacheInputsHash {
-    fn set_inputs_hash(self, hash: StoreHash);
-    fn get_inputs_hash(self) -> Option<StoreHash>;
-}
-
-impl<'a, T> CacheInputsHash for &'a Node<T>
-where
-    &'a T: CacheInputsHash,
-{
-    #[inline]
-    fn set_inputs_hash(self, hash: StoreHash) {
-        self.rest.set_inputs_hash(hash);
-    }
-    #[inline]
-    fn get_inputs_hash(self) -> Option<StoreHash> {
-        self.rest.get_inputs_hash()
-    }
-}
-
-impl<'a, T> CacheInputsHash for &'a mut Node<T>
-where
-    &'a T: CacheInputsHash,
-{
-    #[inline]
-    fn set_inputs_hash(self, hash: StoreHash) {
-        self.rest.set_inputs_hash(hash);
-    }
-    #[inline]
-    fn get_inputs_hash(self) -> Option<StoreHash> {
-        self.rest.get_inputs_hash()
     }
 }
 
@@ -117,26 +89,18 @@ pub struct Graph<T> {
 }
 
 impl<T> Graph<T> {
-    pub fn hash_node_inputs<'s>(&'s self, nid: sgraph::NodeIndex) -> Option<StoreHash>
-    where
-        &'s T: CacheInputsHash,
-    {
+    pub fn hash_node_inputs<'s>(&'s self, nid: sgraph::NodeIndex) -> Option<StoreHash> {
         let node = self.g.node_weight(nid)?;
-        if let Some(x) = node.rest.get_inputs_hash() {
-            return Some(x);
-        }
 
-        use blake2::{
-            digest::{Update, VariableOutput},
-            VarBlake2b,
-        };
-        let incoming = self.g.edges_directed(nid, Direction::Incoming);
+        use blake2::digest::Update;
 
         // for FOD's we only care about the expected hash
         if let Some(x) = node.expect_hash {
             return Some(x);
         }
-        let mut hasher = VarBlake2b::new(24).unwrap();
+
+        let incoming = self.g.edges_directed(nid, Direction::Incoming);
+        let mut hasher = StoreHash::get_hasher();
         // gather input data
         hasher.update(&*node.name);
         hasher.update([0]);
@@ -154,16 +118,16 @@ impl<T> Graph<T> {
             }
         }
 
-        let mut hash = StoreHash([0u8; 24]);
-        hasher.finalize_variable(|res| hash.0.copy_from_slice(res));
-
-        node.set_inputs_hash(hash);
-        Some(hash)
+        Some(StoreHash::finalize_hasher(hasher))
     }
 
     /// replace all references to a node with another one;
     /// used e.g. to merge identical nodes
-    pub fn replace_node(&mut self, from: sgraph::NodeIndex, to: sgraph::NodeIndex) -> Option<Node<T>> {
+    pub fn replace_node(
+        &mut self,
+        from: sgraph::NodeIndex,
+        to: sgraph::NodeIndex,
+    ) -> Option<Node<T>> {
         // ignore input edges, transfer output edges
         let mut oedges: HashMap<_, _> = self
             .g
@@ -202,7 +166,10 @@ impl<T> Graph<T> {
     /// our main job is to deduplicate identical nodes
     /// if the return value contains lesser entries than rhs contains nodes,
     /// then some nodes failed the conversion (e.g. the graph contained a cycle)
-    pub fn take_and_merge<U>(&mut self, rhs: Graph<U>) -> HashMap<sgraph::NodeIndex, sgraph::NodeIndex>
+    pub fn take_and_merge<U>(
+        &mut self,
+        rhs: Graph<U>,
+    ) -> HashMap<sgraph::NodeIndex, sgraph::NodeIndex>
     where
         U: Clone + Into<T>,
     {

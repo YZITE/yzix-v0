@@ -20,7 +20,6 @@ enum Output {
 
 #[derive(Debug)]
 struct NodeMeta {
-    cached_inputs_hash: RefCell<Option<StoreHash>>,
     output: Output,
     log: Sender<String>,
 }
@@ -28,7 +27,6 @@ struct NodeMeta {
 impl From<()> for NodeMeta {
     fn from(_: ()) -> NodeMeta {
         NodeMeta {
-            cached_inputs_hash: RefCell::new(None),
             output: Output::NotDone,
             log: unbounded().0,
             is_target: false,
