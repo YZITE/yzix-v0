@@ -1,0 +1,21 @@
+[package]
+name = "yzix-daemon"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 WITH LLVM-exception"
+
+[dependencies]
+async-channel = "1.6"
+async-executor = "1.4"
+async-lock = "2.4"
+async-net = "1.6"
+async-process = "1.3"
+indicatif = "0.16"
+num_cpus = "1.13"
+
+[dependencies.yzix-core]
+path = "../yzix-core"
+
+[dependencies.yz-server-executor]
+git = "https://github.com/YZITE/server-executor.git"
+branch = "main"

@@ -2,19 +2,24 @@
 name = "yzix-core"
 version = "0.1.0"
 edition = "2021"
-license = "Apache-2.0 WITH LLVM-Exception"
+license = "Apache-2.0 WITH LLVM-exception"
 
 [dependencies]
 base64 = "0.13"
+blake2 = "0.9"
 
 [dependencies.camino]
 version = "1.0"
 features = ["serde1"]
 
+[dependencies.ciborium]
+version = "0.2"
+features = ["std"]
+
 [dependencies.petgraph]
 version = "0.6"
 default-features = false
-features = ["serde-1"]
+features = ["serde-1", "stable_graph"]
 
 [dependencies.serde]
 version = "1.0"
