@@ -1,8 +1,7 @@
 use crate::{StoreHash, StoreName};
-pub use petgraph::stable_graph as sgraph;
+pub use petgraph::stable_graph::{NodeIndex, StableGraph as RawGraph};
 use petgraph::{visit::EdgeRef, Direction};
 use serde::{Deserialize, Serialize};
-pub use sgraph::StableGraph as RawGraph;
 use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -85,11 +84,11 @@ pub enum Edge {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Graph<T> {
-    pub g: sgraph::StableGraph<Node<T>, Edge>,
+    pub g: RawGraph<Node<T>, Edge>,
 }
 
 impl<T> Graph<T> {
-    pub fn hash_node_inputs<'s>(&'s self, nid: sgraph::NodeIndex) -> Option<StoreHash> {
+    pub fn hash_node_inputs(&self, nid: NodeIndex) -> Option<StoreHash> {
         let node = self.g.node_weight(nid)?;
 
         use blake2::digest::Update;
@@ -123,11 +122,7 @@ impl<T> Graph<T> {
 
     /// replace all references to a node with another one;
     /// used e.g. to merge identical nodes
-    pub fn replace_node(
-        &mut self,
-        from: sgraph::NodeIndex,
-        to: sgraph::NodeIndex,
-    ) -> Option<Node<T>> {
+    pub fn replace_node(&mut self, from: NodeIndex, to: NodeIndex) -> Option<Node<T>> {
         // ignore input edges, transfer output edges
         let mut oedges: HashMap<_, _> = self
             .g
@@ -166,10 +161,7 @@ impl<T> Graph<T> {
     /// our main job is to deduplicate identical nodes
     /// if the return value contains lesser entries than rhs contains nodes,
     /// then some nodes failed the conversion (e.g. the graph contained a cycle)
-    pub fn take_and_merge<U>(
-        &mut self,
-        rhs: Graph<U>,
-    ) -> HashMap<sgraph::NodeIndex, sgraph::NodeIndex>
+    pub fn take_and_merge<U>(&mut self, rhs: Graph<U>) -> HashMap<NodeIndex, NodeIndex>
     where
         U: Clone + Into<T>,
     {

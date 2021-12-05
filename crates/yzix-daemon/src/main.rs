@@ -1,15 +1,14 @@
-use yzix_core::{build_graph as bg, StoreHash, StoreName, StorePath, proto::ControlCommand, store::Dump};
-use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
-use async_channel::{Sender, Receiver, unbounded};
+use async_channel::{unbounded, Receiver, Sender};
 use async_ctrlc::CtrlC;
 use async_executor::Executor;
-use async_process::{Command, ExitStatus};
 use async_net::unix::UnixListener;
+use async_process::{Command, ExitStatus};
+use futures_lite::io::AsyncWriteExt;
+use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
-use futures_lite::io::{AsyncWriteExt};
-
-use bg::sgraph::NodeIndex;
+use std::collections::{HashMap, HashSet};
+use yzix_core::build_graph::{self as bg, NodeIndex};
+use yzix_core::{proto::ControlCommand, store::Dump, StoreHash, StoreName, StorePath};
 
 #[derive(Clone, Debug)]
 enum Output {
@@ -48,17 +47,15 @@ enum DoneDetMessage {
 }
 
 enum MainMessage {
-    Control {
-        inner: ControlCommand,
-    },
+    Control { inner: ControlCommand },
     Shutdown,
-    Done {
-        nid: NodeIndex,
-        det: DoneDetMessage,
-    }
+    Done { nid: NodeIndex, det: DoneDetMessage },
 }
 
-async fn handle_logging<T: futures_lite::io::AsyncRead>(log: Sender<String>, pipe: T) -> std::io::Result<()> {
+async fn handle_logging<T: futures_lite::io::AsyncRead>(
+    log: Sender<String>,
+    pipe: T,
+) -> std::io::Result<()> {
     use futures_lite::io::AsyncBufReadExt;
     for i in futures_lite::io::BufReader::new(pipe).lines() {
         if log.send(i.await?).await.is_err() {
@@ -83,7 +80,7 @@ fn main() {
         let (mains, mainr) = unbounded();
         let (ws, wr) = unbounded();
 
-        let mut graph = Graph::default();
+        let mut graph = bg::Graph::default();
 
         // install Ctrl+C handler
         let mains2 = mains.clone();
@@ -98,7 +95,13 @@ fn main() {
             let wr = wr.clone();
             let mains = mains.clone();
             ex.spawn(async move {
-                while let Ok(WorkItem { name, command: (cmd, args), log, nid }) = wr.recv().await {
+                while let Ok(WorkItem {
+                    name,
+                    command: (cmd, args),
+                    log,
+                    nid,
+                }) = wr.recv().await
+                {
                     // FIXME: wrap that into a crun invocation
                     use async_process::Stdio;
                     let det = match Command::new(cmd)
@@ -106,7 +109,8 @@ fn main() {
                         .stdin(Stdio::null())
                         .stdout(Stdio::piped())
                         .stderr(Stdio::piped())
-                        .spawn() {
+                        .spawn()
+                    {
                         Err(e) => DoneDetMessage::IoErr(e),
                         Ok(ch) => {
                             ex.spawn(handle_logging(ch.stdout.take().unwrap())).detach();
@@ -170,34 +174,39 @@ fn main() {
         use MainMessage as MM;
         while let Ok(x) = mains.recv() {
             match x {
-            MM::Shutdown => break,
-            MM::Control { inner } => {
-                use ControlCommand as CM;
-                match inner {
-                    CM::Schedule(graph2) => {
-                        runner.schedule
-                        let existing_nodes: HashSet<_> = graph.g.node_indices().collect();
-                        let trt = graph.take_and_merge(graph2);
-                        for i in graph.g.node_indices().collect::<HashSet<_>>().differece(&existing_nodes) {
-                            // setup log stuff
-                            // TODO: maybe we should map the initial graph instead?
-                            graph.g[i].rest.log = log;
+                MM::Shutdown => break,
+                MM::Control { inner } => {
+                    use ControlCommand as CM;
+                    match inner {
+                        CM::Schedule(graph2) => {
+                            runner.schedule();
+                            let existing_nodes: HashSet<_> = graph.g.node_indices().collect();
+                            let trt = graph.take_and_merge(graph2);
+                            for i in graph
+                                .g
+                                .node_indices()
+                                .collect::<HashSet<_>>()
+                                .differece(&existing_nodes)
+                            {
+                                // setup log stuff
+                                // TODO: maybe we should map the initial graph instead?
+                                graph.g[i].rest.log = log;
+                            }
                         }
-                    },
+                    }
                 }
-            },
-            MM::Done { nid, det } => {
-                let mut node = &mut graph.g[nid];
-                node.is_target = false;
-                use DoneDetMessage as DD;
-                match det {
-                    DD::Ok(x) => {
-                        let outph = StoreHash::hash_complex(&x);
-                        node.rest.output = Output::Success();
-                        // TODO: insert the result into the store
-                    },
+                MM::Done { nid, det } => {
+                    let mut node = &mut graph.g[nid];
+                    node.is_target = false;
+                    use DoneDetMessage as DD;
+                    match det {
+                        DD::Ok(x) => {
+                            let outph = StoreHash::hash_complex(&x);
+                            node.rest.output = Output::Success();
+                            // TODO: insert the result into the store
+                        }
+                    }
                 }
-            },
             }
         }
     });
