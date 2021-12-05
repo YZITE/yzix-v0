@@ -1,23 +1,8 @@
-use crate::{StoreHash, StoreName};
+use crate::{StoreHash, StoreName, InputName};
 pub use petgraph::stable_graph::{NodeIndex, StableGraph as RawGraph};
 use petgraph::{visit::EdgeRef, Direction};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub struct InputName(String);
-
-impl InputName {
-    pub fn new(inp: String) -> Option<Self> {
-        if inp.contains(|i: char| !i.is_ascii_alphanumeric() && i != '_')
-            || inp.starts_with(|i: char| i.is_ascii_digit())
-        {
-            None
-        } else {
-            Some(Self(inp))
-        }
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub enum CmdArgSnip {
@@ -110,7 +95,7 @@ impl<T> Graph<T> {
 
         for i in incoming {
             if let Edge::Placeholder(plh) = &i.weight() {
-                hasher.update(&plh.0);
+                hasher.update(&*plh);
                 hasher.update([0]);
                 hasher.update(&self.hash_node_inputs(i.source())?.0);
                 hasher.update([0]);

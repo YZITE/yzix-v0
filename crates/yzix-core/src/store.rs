@@ -1,3 +1,4 @@
+pub use crate::StoreName as Name;
 use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
 use std::{fmt, sync::Arc};
@@ -60,50 +61,6 @@ impl Hash {
         ciborium::ser::into_writer(x, &mut ser).unwrap();
         hasher.update(ser);
         Self::finalize_hasher(hasher)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
-#[serde(try_from = "String")]
-#[serde(into = "String")]
-pub struct Name(String);
-
-impl Name {
-    pub fn new(inp: String) -> Option<Self> {
-        if inp.contains(|i: char| !i.is_ascii_graphic() || i == '/') {
-            None
-        } else {
-            Some(Self(inp))
-        }
-    }
-}
-
-impl TryFrom<String> for Name {
-    type Error = &'static str;
-
-    fn try_from(x: String) -> Result<Name, &'static str> {
-        Name::new(x).ok_or("invalid store name")
-    }
-}
-
-impl From<Name> for String {
-    fn from(x: Name) -> String {
-        x.0
-    }
-}
-
-impl std::ops::Deref for Name {
-    type Target = str;
-    #[inline]
-    fn deref(&self) -> &str {
-        &*self.0
-    }
-}
-
-impl fmt::Display for Name {
-    #[inline]
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&*self.0)
     }
 }
 
