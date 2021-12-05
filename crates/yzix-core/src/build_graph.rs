@@ -23,9 +23,6 @@ pub struct Node<T> {
     /// to support FODs
     pub expect_hash: Option<StoreHash>,
 
-    /// marker if the target should be built (used to select initial target list)
-    pub is_target: bool,
-
     /// to support additional data
     /// (e.g. used by the server to add execution metadata)
     pub rest: T,
@@ -43,14 +40,12 @@ impl<T> Node<T> {
             name,
             command,
             expect_hash,
-            is_target,
             rest,
         } = self;
         Node {
             name,
             command,
             expect_hash,
-            is_target,
             rest: f(rest),
         }
     }

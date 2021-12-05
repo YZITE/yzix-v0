@@ -7,7 +7,7 @@ use futures_lite::io::AsyncWriteExt;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use yzix_core::build_graph::{self as bg, NodeIndex};
+use yzix_core::build_graph::{self, NodeIndex};
 use yzix_core::{proto::ControlCommand, store::Dump, StoreHash, StoreName, StorePath};
 
 #[derive(Clone, Debug)]
@@ -28,7 +28,6 @@ impl From<()> for NodeMeta {
         NodeMeta {
             output: Output::NotDone,
             log: unbounded().0,
-            is_target: false,
         }
     }
 }
@@ -80,7 +79,7 @@ fn main() {
         let (mains, mainr) = unbounded();
         let (ws, wr) = unbounded();
 
-        let mut graph = bg::Graph::default();
+        let mut graph = build_graph::Graph::default();
 
         // install Ctrl+C handler
         let mains2 = mains.clone();
@@ -197,13 +196,20 @@ fn main() {
                 }
                 MM::Done { nid, det } => {
                     let mut node = &mut graph.g[nid];
-                    node.is_target = false;
                     use DoneDetMessage as DD;
-                    match det {
+                    node.rest.output = match det {
                         DD::Ok(x) => {
                             let outph = StoreHash::hash_complex(&x);
-                            node.rest.output = Output::Success();
                             // TODO: insert the result into the store
+                            Output::Success()
+                        }
+                        DD::ExitErr(es) => {
+                            // TODO: log failure into associated logger
+                            Output::Failed
+                        }
+                        DD::IoErr(ioe) => {
+                            // TODO: log failure into associated logger
+                            Output::Failed
                         }
                     }
                 }
