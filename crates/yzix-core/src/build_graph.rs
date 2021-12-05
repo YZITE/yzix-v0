@@ -26,7 +26,7 @@ pub enum CmdArgSnip {
     Placeholder(InputName),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Node<T> {
     pub name: StoreName,
 
@@ -38,6 +38,9 @@ pub struct Node<T> {
 
     /// to support FODs
     pub expect_hash: Option<StoreHash>,
+
+    /// marker if the target should be built (used to select initial target list)
+    pub is_target: bool,
 
     /// to support additional data
     /// (e.g. used by the server to add execution metadata)
@@ -52,19 +55,49 @@ impl<T, U> std::cmp::PartialEq<Node<U>> for Node<T> {
 
 impl<T> Node<T> {
     pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Node<U> {
-        let Node { name, command, expect_hash, rest } = self;
+        let Node { name, command, expect_hash, is_target, rest } = self;
         Node {
             name,
             command,
             expect_hash,
+            is_target,
             rest: f(rest),
         }
     }
 }
 
+// this trait allows us to abstract over RefCell / RwLock, etc...
 pub trait CacheInputsHash {
     fn set_inputs_hash(self, hash: StoreHash);
     fn get_inputs_hash(self) -> Option<StoreHash>;
+}
+
+impl<'a, T> CacheInputsHash for &'a Node<T>
+where
+    &'a T: CacheInputsHash,
+{
+    #[inline]
+    fn set_inputs_hash(self, hash: StoreHash) {
+        self.rest.set_inputs_hash(hash);
+    }
+    #[inline]
+    fn get_inputs_hash(self) -> Option<StoreHash> {
+        self.rest.get_inputs_hash()
+    }
+}
+
+impl<'a, T> CacheInputsHash for &'a mut Node<T>
+where
+    &'a T: CacheInputsHash,
+{
+    #[inline]
+    fn set_inputs_hash(self, hash: StoreHash) {
+        self.rest.set_inputs_hash(hash);
+    }
+    #[inline]
+    fn get_inputs_hash(self) -> Option<StoreHash> {
+        self.rest.get_inputs_hash()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -78,9 +111,9 @@ pub enum Edge {
     AssertEqual,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Graph<T> {
-    g: sgraph::StableGraph<Node<T>, Edge>,
+    pub g: sgraph::StableGraph<Node<T>, Edge>,
 }
 
 impl<T> Graph<T> {
@@ -124,7 +157,7 @@ impl<T> Graph<T> {
         let mut hash = StoreHash([0u8; 24]);
         hasher.finalize_variable(|res| hash.0.copy_from_slice(res));
 
-        node.rest.set_inputs_hash(hash);
+        node.set_inputs_hash(hash);
         Some(hash)
     }
 
@@ -169,9 +202,9 @@ impl<T> Graph<T> {
     /// our main job is to deduplicate identical nodes
     /// if the return value contains lesser entries than rhs contains nodes,
     /// then some nodes failed the conversion (e.g. the graph contained a cycle)
-    pub fn take_and_merge(&mut self, rhs: Graph<()>) -> HashMap<sgraph::NodeIndex, sgraph::NodeIndex>
+    pub fn take_and_merge<U>(&mut self, rhs: Graph<U>) -> HashMap<sgraph::NodeIndex, sgraph::NodeIndex>
     where
-        T: Default,
+        U: Clone + Into<T>,
     {
         // handle the initial scheduling faster
         // disable that for now, we really want node deduplication
@@ -225,7 +258,7 @@ impl<T> Graph<T> {
                 }
 
                 // copy it
-                let j = self.g.add_node(ni.clone().map(|()| T::default()));
+                let j = self.g.add_node(ni.clone().map(Into::into));
                 ret.insert(i, j);
 
                 // copy ingoing edges
