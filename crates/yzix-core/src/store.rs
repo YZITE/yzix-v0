@@ -100,6 +100,37 @@ pub enum Dump {
     Directory(std::collections::BTreeMap<String, Dump>),
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("{real_path}: {kind}")]
+pub struct Error {
+    pub real_path: std::path::PathBuf,
+    #[source]
+    pub kind: ErrorKind,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ErrorKind {
+    #[error("unable to convert symlink destination to UTF-8")]
+    NonUtf8SymlinkTarget,
+
+    #[error("unable to convert file name to UTF-8")]
+    NonUtf8Basename,
+
+    #[error("got unknown file type {0:?}")]
+    UnknownFileType(std::fs::FileType),
+
+    #[error("directory entries with empty names are invalid")]
+    EmptyBasename,
+
+    #[error("symlinks are unsupported on this system")]
+    #[cfg(not(any(unix, windows)))]
+    SymlinksUnsupported,
+
+    #[error("store dump declined to overwrite file")]
+    /// NOTE: this obviously gets attached to the directory name
+    OverwriteDeclined,
+}
+
 #[allow(unused_variables)]
 impl Dump {
     pub fn read_from_path(x: &std::path::Path) -> std::io::Result<Self> {
@@ -109,14 +140,15 @@ impl Dump {
             let target = fs::read_link(x)?.try_into().map_err(|_| {
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    "unable to convert symlink destination to UTF-8",
+                    Error {
+                        real_path: x.to_path_buf(),
+                        kind: ErrorKind::NonUtf8SymlinkTarget,
+                    },
                 )
             })?;
-            let to_dir = if let Ok(x) = std::fs::metadata(x) {
-                x.file_type().is_dir()
-            } else {
-                false
-            };
+            let to_dir = std::fs::metadata(x)
+                .map(|y| y.file_type().is_dir())
+                .unwrap_or(false);
             Dump::SymLink { target, to_dir }
         } else if ty.is_file() {
             Dump::Regular {
@@ -140,7 +172,10 @@ impl Dump {
                         let name = entry.file_name().into_string().map_err(|_| {
                             std::io::Error::new(
                                 std::io::ErrorKind::InvalidData,
-                                "unable to convert file name to UTF-8",
+                                Error {
+                                    real_path: entry.path(),
+                                    kind: ErrorKind::NonUtf8Basename,
+                                },
                             )
                         })?;
                         let val = Dump::read_from_path(&entry.path())?;
@@ -151,69 +186,145 @@ impl Dump {
         } else {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("unable to decode file type of '{}'", x.display()),
+                Error {
+                    real_path: x.to_path_buf(),
+                    kind: ErrorKind::UnknownFileType(ty),
+                },
             ));
         })
     }
 
     /// we require that the parent directory already exists,
     /// and will override the target path `x` if it already exists.
-    pub fn write_to_path(&self, x: &std::path::Path) -> std::io::Result<()> {
+    pub fn write_to_path(&self, x: &std::path::Path, force: bool) -> std::io::Result<()> {
+        // one second past epoch, necessary for e.g. GNU make to recognize
+        // the dumped files as "oldest"
+        // TODO: when https://github.com/alexcrichton/filetime/pull/75 is merged,
+        //   upgrade `filetime` and make this a global `const` binding.
+        let reftime = filetime::FileTime::from_unix_time(1, 0);
+
+        use std::io::{Error as IoError, ErrorKind as IoErrorKind};
+
+        if let Ok(y) = fs::symlink_metadata(x) {
+            if !y.is_dir() {
+                if force {
+                    // TODO: optimize for the case when the file is exactly the same
+                    fs::remove_file(x)?;
+                } else {
+                    return Err(IoError::new(
+                        IoErrorKind::AlreadyExists,
+                        Error {
+                            real_path: x.to_path_buf(),
+                            kind: ErrorKind::OverwriteDeclined,
+                        },
+                    ));
+                }
+            } else if let Dump::Directory(_) = self {
+                // passthrough
+            } else if force {
+                fs::remove_dir_all(x)?;
+            } else {
+                return Err(IoError::new(
+                    IoErrorKind::AlreadyExists,
+                    Error {
+                        real_path: x.to_path_buf(),
+                        kind: ErrorKind::OverwriteDeclined,
+                    },
+                ));
+            }
+        }
+
         match self {
             Dump::SymLink { target, to_dir } => {
                 #[cfg(windows)]
                 {
                     use std::os::windows::fs as wfs;
                     if to_dir {
-                        wfs::symlink_dir(&target, x)
+                        wfs::symlink_dir(&target, x)?;
                     } else {
-                        wfs::symlink_file(&target, x)
+                        wfs::symlink_file(&target, x)?;
                     }
                 }
 
                 #[cfg(unix)]
                 {
-                    std::os::unix::fs::symlink(&target, x)
+                    std::os::unix::fs::symlink(&target, x)?;
                 }
 
                 #[cfg(not(any(windows, unix)))]
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
+                return Err(IoError::new(
+                    IoErrorKind::InvalidInput,
                     "symlinks aren't supported on this platform",
-                ))
+                ));
             }
             Dump::Regular {
                 executable,
                 contents,
             } => {
-                std::fs::write(x, contents)?;
+                fs::write(x, contents)?;
 
                 #[cfg(unix)]
-                std::fs::set_permissions(
+                fs::set_permissions(
                     x,
                     std::os::unix::fs::PermissionsExt::from_mode(if *executable {
                         0o555
                     } else {
                         0o444
                     }),
-                )
+                )?;
             }
             Dump::Directory(contents) => {
-                std::fs::create_dir(&x)?;
+                if let Err(e) = fs::create_dir(&x) {
+                    if e.kind() == IoErrorKind::AlreadyExists {
+                        // the check at the start of the function should have taken
+                        // care of the annoying edge cases.
+                        // x is thus already a directory
+                        for entry in fs::read_dir(x)? {
+                            let entry = entry?;
+                            if entry
+                                .file_name()
+                                .into_string()
+                                .ok()
+                                .map(|x| contents.contains_key(&x))
+                                != Some(true)
+                            {
+                                // file does not exist in the expected contents...
+                                let real_path = entry.path();
+                                if !force {
+                                    return Err(IoError::new(
+                                        IoErrorKind::AlreadyExists,
+                                        Error {
+                                            real_path,
+                                            kind: ErrorKind::OverwriteDeclined,
+                                        },
+                                    ));
+                                } else if entry.file_type()?.is_dir() {
+                                    fs::remove_dir_all(real_path)
+                                } else {
+                                    fs::remove_file(real_path)
+                                }?;
+                            }
+                        }
+                    }
+                }
                 let mut xs = x.to_path_buf();
                 for (name, val) in contents {
                     if name.is_empty() {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::InvalidInput,
-                            "empty file names are invalid",
+                        return Err(IoError::new(
+                            IoErrorKind::InvalidInput,
+                            Error {
+                                real_path: x.to_path_buf(),
+                                kind: ErrorKind::EmptyBasename,
+                            },
                         ));
                     }
                     xs.push(name);
-                    Dump::write_to_path(val, &xs)?;
+                    // this call also deals with cases where the file already exists
+                    Dump::write_to_path(val, &xs, force)?;
                     xs.pop();
                 }
-                Ok(())
             }
         }
+        filetime::set_symlink_file_times(x, reftime, reftime)
     }
 }

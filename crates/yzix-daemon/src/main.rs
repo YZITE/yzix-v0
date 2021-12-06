@@ -99,6 +99,9 @@ async fn handle_process(
 }
 
 fn main() {
+    // set the time zone to avoid funky locale stuff
+    std::env::set_var("TZ", "UTC");
+
     let pbar = indicatif::ProgressBar::new();
     let base = yzix_core::store::Base::Local {
         path: "/tmp/yzix-store".into(),
