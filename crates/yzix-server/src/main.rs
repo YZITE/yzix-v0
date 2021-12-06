@@ -1,7 +1,7 @@
 use async_channel::{unbounded, Receiver, Sender};
 use async_ctrlc::CtrlC;
-use async_executor::Executor;
-use async_net::unix::UnixListener;
+use yz_server_executor::Executor;
+use async_net::tcp::TcpListener;
 use async_process::{Command, ExitStatus};
 use futures_lite::io::AsyncWriteExt;
 use serde::{Deserialize, Serialize};
@@ -101,14 +101,15 @@ async fn handle_process(
 fn main() {
     // set the time zone to avoid funky locale stuff
     std::env::set_var("TZ", "UTC");
+    let cpucnt = num_cpus::get();
 
     let pbar = indicatif::ProgressBar::new();
     let base = yzix_core::store::Base::Local {
         path: "/tmp/yzix-store".into(),
         writable: true,
     };
-    let ex = yz_server_executor::ServerExecutor::new();
-    let listener = UnixListener::bind("/tmp/yzix-srv").unwrap();
+    let ex = yz_server_executor::ServerExecutor::with_threads(cpucnt);
+    let listener = TcpListener::bind("127.0.0.1:3669").unwrap();
 
     ex.block_on(move |ex| {
         // we don't need workers. we just spawn tasks instead
@@ -131,7 +132,7 @@ fn main() {
         });
 
         // start workers
-        for i in 0..num_cpus::get() {
+        for i in 0..cpucnt {
             let wr = wr.clone();
             let mains = mains.clone();
             ex.spawn(async move {
