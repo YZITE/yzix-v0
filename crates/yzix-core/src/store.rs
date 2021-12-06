@@ -73,21 +73,29 @@ impl Hash {
 
 #[derive(Clone, Debug)]
 pub struct Path {
-    base: Arc<Base>,
-    hash: Hash,
-    name: Name,
+    pub base: Arc<Base>,
+    pub hash: Hash,
 }
 
 impl fmt::Display for Path {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}/{}-{}", self.base, self.hash, self.name)
+        write!(f, "{}/{}", self.base, self.hash)
     }
 }
 
 /// sort-of emulation of NAR using CBOR
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase", tag = "type")]
 pub enum Dump {
-    Regular { executable: bool, contents: Vec<u8> },
-    SymLink { target: Utf8PathBuf },
-    Directory(std::collections::BTreeMap<String, Dump>),
+    Regular {
+        executable: bool,
+        contents: Vec<u8>,
+    },
+    SymLink {
+        target: Utf8PathBuf,
+    },
+    Directory {
+        #[serde(flatten)]
+        contents: std::collections::BTreeMap<String, Dump>,
+    },
 }

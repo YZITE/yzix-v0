@@ -14,6 +14,7 @@ pub enum CmdArgSnip {
 pub struct Node<T> {
     pub name: StoreName,
     pub kind: NodeKind,
+    pub logtag: u64,
 
     /// to support additional data
     /// (e.g. used by the server to add execution metadata)
@@ -44,8 +45,8 @@ pub enum NodeKind {
     /// top-level, which is a directory
     Dump { id: u64 },
 
-    /// similar to `Dump`, but only send the store paths
-    NotifyAbtStorePaths { id: u64 },
+    /// similar to `Dump`, but only send the store hashs or exit code
+    NotifyAbtOutput { id: u64 },
 }
 
 impl<T, U> std::cmp::PartialEq<Node<U>> for Node<T> {
@@ -56,10 +57,16 @@ impl<T, U> std::cmp::PartialEq<Node<U>> for Node<T> {
 
 impl<T> Node<T> {
     pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Node<U> {
-        let Node { name, kind, rest } = self;
+        let Node {
+            name,
+            kind,
+            logtag,
+            rest,
+        } = self;
         Node {
             name,
             kind,
+            logtag,
             rest: f(rest),
         }
     }
@@ -105,13 +112,12 @@ impl<T> Graph<T> {
                 hasher.update(b"undump\0");
                 cbor_write(dat, &mut tmp_ser)
             }
-            NodeKind::Dump { id } => {
-                hasher.update(b"dump\0");
-                cbor_write(id, &mut tmp_ser)
+            // always build notify nodes
+            NodeKind::Dump { .. } => {
+                return None;
             }
-            NodeKind::NotifyAbtStorePaths { id } => {
-                hasher.update(b"notify-abt-store-paths\0");
-                cbor_write(id, &mut tmp_ser)
+            NodeKind::NotifyAbtOutput { .. } => {
+                return None;
             }
         }
         .unwrap();
