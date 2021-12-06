@@ -1,4 +1,4 @@
-use crate::{InputName, StoreHash, StoreName};
+use crate::store::Hash as StoreHash;
 pub use petgraph::stable_graph::{NodeIndex, StableGraph as RawGraph};
 use petgraph::{visit::EdgeRef, Direction};
 use serde::{Deserialize, Serialize};
@@ -7,12 +7,12 @@ use std::collections::HashMap;
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub enum CmdArgSnip {
     String(String),
-    Placeholder(InputName),
+    Placeholder(String),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Node<T> {
-    pub name: StoreName,
+    pub name: String,
     pub kind: NodeKind,
     pub logtag: u64,
 
@@ -32,6 +32,8 @@ pub enum NodeKind {
         /// concatenated before invocation,
         /// to make it possible to properly use placeholders
         command: Vec<Vec<CmdArgSnip>>,
+
+        envs: HashMap<String, Vec<CmdArgSnip>>,
     },
 
     /// this is necessary to just let the client download stuff,
@@ -44,9 +46,6 @@ pub enum NodeKind {
     /// inputs (with each input represented as an entry in the
     /// top-level, which is a directory
     Dump { id: u64 },
-
-    /// similar to `Dump`, but only send the store hashs or exit code
-    NotifyAbtOutput { id: u64 },
 }
 
 impl<T, U> std::cmp::PartialEq<Node<U>> for Node<T> {
@@ -89,7 +88,7 @@ impl<T> Node<T> {
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub enum Edge {
-    Placeholder(InputName),
+    Placeholder(String),
 
     /// instead of allowing loops, we instead insert this edge
     /// which describes basically an "dynamic expect_hash",
@@ -119,26 +118,27 @@ impl<T> Graph<T> {
         let mut hasher = StoreHash::get_hasher();
         let mut tmp_ser = Vec::new();
         match &node.kind {
-            NodeKind::Run { command } => {
+            NodeKind::Run { command, envs } => {
                 hasher.update(b"run\0");
-                cbor_write(command, &mut tmp_ser)
+                cbor_write(command, &mut tmp_ser).unwrap();
+                hasher.update(&tmp_ser);
+                hasher.update(b"\0envs\0");
+                cbor_write(envs, &mut tmp_ser).unwrap();
+                hasher.update(&tmp_ser);
+                hasher.update([0]);
             }
             NodeKind::UnDump { dat } => {
                 hasher.update(b"undump\0");
-                cbor_write(dat, &mut tmp_ser)
+                cbor_write(dat, &mut tmp_ser).unwrap();
+                hasher.update(&tmp_ser);
+                hasher.update([0]);
             }
             // always build notify nodes
             NodeKind::Dump { .. } => {
                 return None;
             }
-            NodeKind::NotifyAbtOutput { .. } => {
-                return None;
-            }
         }
-        .unwrap();
-        hasher.update(tmp_ser);
         let _ = tmp_ser;
-        hasher.update([0]);
 
         for i in self.g.edges(nid) {
             if let Edge::Placeholder(plh) = &i.weight() {
@@ -199,9 +199,10 @@ impl<T> Graph<T> {
     /// our main job is to deduplicate identical nodes
     /// if the return value contains lesser entries than rhs contains nodes,
     /// then some nodes failed the conversion (e.g. the graph contained a cycle)
-    pub fn take_and_merge<U, F>(&mut self, rhs: Graph<U>, mut mapf: F) -> HashMap<NodeIndex, NodeIndex>
+    pub fn take_and_merge<U, MF, AF>(&mut self, rhs: Graph<U>, mut mapf: MF, attachf: AF) -> HashMap<NodeIndex, NodeIndex>
     where
-        F: FnMut(&U) -> T,
+        MF: FnMut(&U) -> T,
+        AF: Fn(&mut T),
     {
         // handle the initial scheduling faster
         // disable that for now, we really want node deduplication
@@ -245,13 +246,14 @@ impl<T> Graph<T> {
                     if ni == self.g.node_weight(j).unwrap()
                         && self
                             .g
-                            .edges(i)
+                            .edges(j)
                             .map(|je| (je.target(), je.weight()))
                             .collect::<HashMap<_, _>>()
                             == res_inps
                     {
                         // we have found an identical node, merge
                         ret.insert(i, j);
+                        attachf(&mut self.g[j].rest);
                         continue 'l_noinp;
                     }
                 }

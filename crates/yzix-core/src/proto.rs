@@ -27,15 +27,30 @@ pub enum ResponseKind {
     OutputNotify(Result<StoreHash, OutputError>),
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, thiserror::Error)]
 pub enum OutputError {
-    /// command returned with exit code
+    #[error("command returned with exit code {0}")]
     Exit(i32),
-    /// command was killed
+
+    #[error("command was killed with signal {0}")]
     Killed(i32),
-    /// server-side I/O error
+
+    #[error("server-side I/O error with errno {0}")]
     Io(i32),
-    /// something else, idk.
+
+    #[error("mismatch against AssertEqual ({0} != {1})")]
+    HashMismatch(StoreHash, StoreHash),
+
+    #[error("missing input edge '{0}'")]
+    InputNotFound(String),
+
+    #[error("multiple input edges used the same placeholder name '{0}'")]
+    InputDup(String),
+
+    #[error("given command is empty")]
+    EmptyCommand,
+
+    #[error("an underspecified error happened: {0}")]
     Unknown(String),
 }
 

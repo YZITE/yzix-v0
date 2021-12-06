@@ -1,22 +1,6 @@
-pub use crate::StoreName as Name;
 use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
-use std::{convert, fmt, fs, sync::Arc};
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub enum Base {
-    Local { path: Utf8PathBuf, writable: bool },
-}
-
-impl fmt::Display for Base {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Base::Local { path, writable } => {
-                write!(f, "{}{}", path, if *writable { "" } else { "[ro]" })
-            }
-        }
-    }
-}
+use std::{convert, fmt, fs};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
 pub struct Hash(pub [u8; 24]);
@@ -68,18 +52,6 @@ impl Hash {
         ciborium::ser::into_writer(x, &mut ser).unwrap();
         hasher.update(ser);
         Self::finalize_hasher(hasher)
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct Path {
-    pub base: Arc<Base>,
-    pub hash: Hash,
-}
-
-impl fmt::Display for Path {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}/{}", self.base, self.hash)
     }
 }
 
