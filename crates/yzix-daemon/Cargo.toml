@@ -17,7 +17,6 @@ indicatif = "0.16"
 num_cpus = "1.13"
 serde = "1.0"
 tempfile = "3.2"
-walkdir = "2.3"
 
 [dependencies.yzix-core]
 path = "../yzix-core"

@@ -1,7 +1,7 @@
 pub use crate::StoreName as Name;
 use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
-use std::{convert, fmt, sync::Arc};
+use std::{convert, fmt, fs, sync::Arc};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum Base {
@@ -93,9 +93,127 @@ pub enum Dump {
     },
     SymLink {
         target: Utf8PathBuf,
+        /// marker, if the symlink points to a directory,
+        /// to correctly restore symlinks on windows
+        to_dir: bool,
     },
-    Directory {
-        #[serde(flatten)]
-        contents: std::collections::BTreeMap<String, Dump>,
-    },
+    Directory(std::collections::BTreeMap<String, Dump>),
+}
+
+#[allow(unused_variables)]
+impl Dump {
+    pub fn read_from_path(x: &std::path::Path) -> std::io::Result<Self> {
+        let meta = fs::symlink_metadata(x)?;
+        let ty = meta.file_type();
+        Ok(if ty.is_symlink() {
+            let target = fs::read_link(x)?.try_into().map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "unable to convert symlink destination to UTF-8",
+                )
+            })?;
+            let to_dir = if let Ok(x) = std::fs::metadata(x) {
+                x.file_type().is_dir()
+            } else {
+                false
+            };
+            Dump::SymLink { target, to_dir }
+        } else if ty.is_file() {
+            Dump::Regular {
+                executable: {
+                    #[cfg(unix)]
+                    let y =
+                        std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o111 != 0;
+
+                    #[cfg(not(unix))]
+                    let y = false;
+
+                    y
+                },
+                contents: std::fs::read(x)?,
+            }
+        } else if ty.is_dir() {
+            Dump::Directory(
+                std::fs::read_dir(x)?
+                    .map(|entry| {
+                        let entry = entry?;
+                        let name = entry.file_name().into_string().map_err(|_| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "unable to convert file name to UTF-8",
+                            )
+                        })?;
+                        let val = Dump::read_from_path(&entry.path())?;
+                        Ok::<_, std::io::Error>((name, val))
+                    })
+                    .collect::<Result<_, _>>()?,
+            )
+        } else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unable to decode file type of '{}'", x.display()),
+            ));
+        })
+    }
+
+    /// we require that the parent directory already exists,
+    /// and will override the target path `x` if it already exists.
+    pub fn write_to_path(&self, x: &std::path::Path) -> std::io::Result<()> {
+        match self {
+            Dump::SymLink { target, to_dir } => {
+                #[cfg(windows)]
+                {
+                    use std::os::windows::fs as wfs;
+                    if to_dir {
+                        wfs::symlink_dir(&target, x)
+                    } else {
+                        wfs::symlink_file(&target, x)
+                    }
+                }
+
+                #[cfg(unix)]
+                {
+                    std::os::unix::fs::symlink(&target, x)
+                }
+
+                #[cfg(not(any(windows, unix)))]
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "symlinks aren't supported on this platform",
+                ))
+            }
+            Dump::Regular {
+                executable,
+                contents,
+            } => {
+                std::fs::write(x, contents)?;
+
+                #[cfg(unix)]
+                std::fs::set_permissions(
+                    x,
+                    std::os::unix::fs::PermissionsExt::from_mode(if *executable {
+                        0o555
+                    } else {
+                        0o444
+                    }),
+                )
+            }
+            Dump::Directory(contents) => {
+                std::fs::create_dir(&x)?;
+                let mut xs = x.to_path_buf();
+                for (name, val) in contents {
+                    if name.is_empty() {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "empty file names are invalid",
+                        ));
+                    }
+                    xs.push(name);
+                    Dump::write_to_path(val, &xs)?;
+                    xs.pop();
+                }
+                Ok(())
+            }
+        }
+    }
 }

@@ -8,12 +8,14 @@ use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use yzix_core::build_graph::{self, NodeIndex};
-use yzix_core::{proto::ControlCommand, store::Dump, StoreHash, StoreName, StorePath};
+use yzix_core::proto::{ControlCommand, OutputError};
+use yzix_core::{store::Dump, StoreHash, StoreName, StorePath};
 
 #[derive(Clone, Debug)]
 enum Output {
     NotDone,
-    Failed,
+    Running,
+    Failed(OutputError),
     Success(StorePath),
 }
 
@@ -39,16 +41,15 @@ struct WorkItem {
     nid: NodeIndex,
 }
 
-enum DoneDetMessage {
-    Ok(Dump),
-    ExitErr(ExitStatus),
-    IoErr(std::io::Error),
-}
-
 enum MainMessage {
-    Control { inner: ControlCommand },
+    Control {
+        inner: ControlCommand,
+    },
     Shutdown,
-    Done { nid: NodeIndex, det: DoneDetMessage },
+    Done {
+        nid: NodeIndex,
+        det: Result<Dump, OutputError>,
+    },
 }
 
 async fn handle_logging<T: futures_lite::io::AsyncRead>(
@@ -63,9 +64,46 @@ async fn handle_logging<T: futures_lite::io::AsyncRead>(
     }
 }
 
+async fn handle_process(
+    ex: &Executor<'static>,
+    cmd: String,
+    args: Vec<String>,
+    log: Sender<String>,
+) -> Result<Dump, OutputError> {
+    // FIXME: wrap that into a crun invocation
+    use async_process::Stdio;
+    let ch = Command::new(cmd)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    ex.spawn(handle_logging(ch.stdout.take().unwrap(), log.clone()))
+        .detach();
+    ex.spawn(handle_logging(ch.stderr.take().unwrap(), log))
+        .detach();
+    let exs = ch.status().await?;
+    if exs.success() {
+        // FIXME: serialize the output
+        Ok(Dump::Directory(Default::default()))
+    } else if let Some(x) = exs.code() {
+        Err(OutputError::Exit(x))
+    } else {
+        #[cfg(unix)]
+        if let Some(x) = std::os::unix::process::ExitStatusExt::signal(&exs) {
+            return Err(OutputError::Killed(x));
+        }
+
+        Err(OutputError::Unknown(exs.to_string()))
+    }
+}
+
 fn main() {
     let pbar = indicatif::ProgressBar::new();
-    let base = yzix_core::StoreBase::Local("/tmp/yzix-store".into());
+    let base = yzix_core::store::Base::Local {
+        path: "/tmp/yzix-store".into(),
+        writable: true,
+    };
     let ex = yz_server_executor::ServerExecutor::new();
     let listener = UnixListener::bind("/tmp/yzix-srv").unwrap();
 
@@ -101,29 +139,7 @@ fn main() {
                     nid,
                 }) = wr.recv().await
                 {
-                    // FIXME: wrap that into a crun invocation
-                    use async_process::Stdio;
-                    let det = match Command::new(cmd)
-                        .args(args)
-                        .stdin(Stdio::null())
-                        .stdout(Stdio::piped())
-                        .stderr(Stdio::piped())
-                        .spawn()
-                    {
-                        Err(e) => DoneDetMessage::IoErr(e),
-                        Ok(ch) => {
-                            ex.spawn(handle_logging(ch.stdout.take().unwrap())).detach();
-                            ex.spawn(handle_logging(ch.stderr.take().unwrap())).detach();
-                            match ch.status() {
-                                Err(e) => DoneDetMessage::IoErr(e),
-                                Ok(x) if x.success() => {
-                                    // FIXME: serialize the output
-                                    DoneDetMessage::Ok(Dump::Directory(Default::default()))
-                                }
-                                Ok(x) => DoneDetMessage::ExitErr(x),
-                            }
-                        }
-                    };
+                    let det = handle_process(ex, cmd, args, log).await;
                     if mains.send(MainMessage::Done { nid, det }).await.is_err() {
                         break;
                     }
@@ -196,20 +212,15 @@ fn main() {
                 }
                 MM::Done { nid, det } => {
                     let mut node = &mut graph.g[nid];
-                    use DoneDetMessage as DD;
                     node.rest.output = match det {
-                        DD::Ok(x) => {
+                        Ok(x) => {
                             let outph = StoreHash::hash_complex(&x);
                             // TODO: insert the result into the store
-                            Output::Success()
+                            Output::Success(x)
                         }
-                        DD::ExitErr(es) => {
+                        Err(e) => {
                             // TODO: log failure into associated logger
-                            Output::Failed
-                        }
-                        DD::IoErr(ioe) => {
-                            // TODO: log failure into associated logger
-                            Output::Failed
+                            Output::Failed(e)
                         }
                     }
                 }

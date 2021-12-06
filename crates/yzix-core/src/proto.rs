@@ -30,11 +30,21 @@ pub enum ResponseKind {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum OutputError {
     /// command returned with exit code
-    Exit(core::num::NonZeroI32),
+    Exit(i32),
     /// command was killed
     Killed(i32),
     /// server-side I/O error
     Io(i32),
     /// something else, idk.
-    Unknown,
+    Unknown(String),
+}
+
+impl From<std::io::Error> for OutputError {
+    fn from(e: std::io::Error) -> OutputError {
+        if let Some(x) = e.raw_os_error() {
+            OutputError::Io(x)
+        } else {
+            OutputError::Unknown(e.to_string())
+        }
+    }
 }
