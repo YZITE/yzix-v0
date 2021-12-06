@@ -70,6 +70,21 @@ impl<T> Node<T> {
             rest: f(rest),
         }
     }
+
+    pub fn map_ref<U>(&self, f: impl FnOnce(&T) -> U) -> Node<U> {
+        let Node {
+            name,
+            kind,
+            logtag,
+            rest,
+        } = self;
+        Node {
+            name: name.clone(),
+            kind: kind.clone(),
+            logtag: *logtag,
+            rest: f(rest),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -184,9 +199,9 @@ impl<T> Graph<T> {
     /// our main job is to deduplicate identical nodes
     /// if the return value contains lesser entries than rhs contains nodes,
     /// then some nodes failed the conversion (e.g. the graph contained a cycle)
-    pub fn take_and_merge<U>(&mut self, rhs: Graph<U>) -> HashMap<NodeIndex, NodeIndex>
+    pub fn take_and_merge<U, F>(&mut self, rhs: Graph<U>, mut mapf: F) -> HashMap<NodeIndex, NodeIndex>
     where
-        U: Clone + Into<T>,
+        F: FnMut(&U) -> T,
     {
         // handle the initial scheduling faster
         // disable that for now, we really want node deduplication
@@ -213,11 +228,13 @@ impl<T> Graph<T> {
                 }
 
                 // contains outgoing half-edges
-                let res_inps: HashMap<_, _> = rhs
-                    .g
-                    .edges(i)
-                    .flat_map(|ie| ret.get(&ie.target()).map(|&x| (x, ie.weight())))
-                    .collect();
+                let res_inps = rhs.g.edges(i);
+                let res_inps_cnt = res_inps.clone().count();
+                let res_inps: HashMap<_, _> = res_inps.flat_map(|ie| ret.get(&ie.target()).map(|&x| (x, ie.weight()))).collect();
+                if res_inps.len() != res_inps_cnt {
+                    // contains unresolved inputs
+                    continue;
+                }
 
                 let ni = rhs.g.node_weight(i).unwrap();
 
@@ -239,8 +256,8 @@ impl<T> Graph<T> {
                     }
                 }
 
-                // copy it
-                let j = self.g.add_node(ni.clone().map(Into::into));
+                // move it
+                let j = self.g.add_node(ni.map_ref(&mut mapf));
                 ret.insert(i, j);
 
                 // copy outgoing edges
