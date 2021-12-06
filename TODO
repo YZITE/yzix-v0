@@ -1,0 +1,4 @@
+besides the stuff mentioned in comments throughout the code,
+a few things would be nice to have or somewhat important:
+- authentication
+- dump <- input-hash association signatures (realizations)
