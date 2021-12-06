@@ -1,7 +1,7 @@
 pub use crate::StoreName as Name;
 use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
-use std::{fmt, sync::Arc};
+use std::{convert, fmt, sync::Arc};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum Base {
@@ -37,6 +37,13 @@ impl std::str::FromStr for Hash {
                 .try_into()
                 .map_err(|_| base64::DecodeError::InvalidLength)?,
         ))
+    }
+}
+
+impl convert::AsRef<[u8]> for Hash {
+    #[inline]
+    fn as_ref(&self) -> &[u8] {
+        &self.0
     }
 }
 
@@ -78,7 +85,7 @@ impl fmt::Display for Path {
 }
 
 /// sort-of emulation of NAR using CBOR
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub enum Dump {
     Regular { executable: bool, contents: Vec<u8> },
     SymLink { target: Utf8PathBuf },

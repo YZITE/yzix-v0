@@ -58,7 +58,7 @@ macro_rules! make_strwrapper {
     }
 }
 
-make_strwrapper!{ InputName(inp) || "invalid input name"; {
+make_strwrapper! { InputName(inp) || "invalid input name"; {
     if inp.contains(|i: char| !i.is_ascii_alphanumeric() && !matches!(i, '_' | '-' | '.'))
         || inp.starts_with(|i: char| i.is_ascii_digit())
     {
@@ -68,7 +68,7 @@ make_strwrapper!{ InputName(inp) || "invalid input name"; {
     }
 }}
 
-make_strwrapper!{StoreName(inp) || "invalid store name"; {
+make_strwrapper! {StoreName(inp) || "invalid store name"; {
     if inp.contains(|i: char| !i.is_ascii_graphic() || i == '/') {
         None
     } else {

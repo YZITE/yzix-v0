@@ -1,4 +1,4 @@
-use crate::{StoreHash, StoreName, InputName};
+use crate::{InputName, StoreHash, StoreName};
 pub use petgraph::stable_graph::{NodeIndex, StableGraph as RawGraph};
 use petgraph::{visit::EdgeRef, Direction};
 use serde::{Deserialize, Serialize};
@@ -13,39 +13,53 @@ pub enum CmdArgSnip {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Node<T> {
     pub name: StoreName,
-
-    /// the first level of Vec represents argv[],
-    /// the second level contains components which will be
-    /// concatenated before invocation,
-    /// to make it possible to properly use placeholders
-    pub command: Vec<Vec<CmdArgSnip>>,
-
-    /// to support FODs
-    pub expect_hash: Option<StoreHash>,
+    pub kind: NodeKind,
 
     /// to support additional data
     /// (e.g. used by the server to add execution metadata)
     pub rest: T,
 }
 
+// we don't support FOD's for now,
+// I don't think they are strictly necessary, and if that
+// is proved wrong, we may always add them later.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub enum NodeKind {
+    Run {
+        /// the first level of Vec represents argv[],
+        /// the second level contains components which will be
+        /// concatenated before invocation,
+        /// to make it possible to properly use placeholders
+        command: Vec<Vec<CmdArgSnip>>,
+    },
+
+    /// this is necessary to just let the client download stuff,
+    /// and use it as a source;
+    /// additionally, it also might allow us to later extend this
+    /// to suppot some distcc-like workflow
+    UnDump { dat: crate::store::Dump },
+
+    /// when this node is reached, send a combined dump of all
+    /// inputs (with each input represented as an entry in the
+    /// top-level, which is a directory
+    Dump { id: u64 },
+
+    /// similar to `Dump`, but only send the store paths
+    NotifyAbtStorePaths { id: u64 },
+}
+
 impl<T, U> std::cmp::PartialEq<Node<U>> for Node<T> {
     fn eq(&self, rhs: &Node<U>) -> bool {
-        self.name == rhs.name && self.command == rhs.command && self.expect_hash == rhs.expect_hash
+        self.name == rhs.name && self.kind == rhs.kind
     }
 }
 
 impl<T> Node<T> {
     pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Node<U> {
-        let Node {
-            name,
-            command,
-            expect_hash,
-            rest,
-        } = self;
+        let Node { name, kind, rest } = self;
         Node {
             name,
-            command,
-            expect_hash,
+            kind,
             rest: f(rest),
         }
     }
@@ -62,37 +76,60 @@ pub enum Edge {
     AssertEqual,
 }
 
+pub trait ReadOutHash {
+    fn read_out_hash(&self) -> Option<StoreHash>;
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Graph<T> {
     pub g: RawGraph<Node<T>, Edge>,
 }
 
 impl<T> Graph<T> {
-    pub fn hash_node_inputs(&self, nid: NodeIndex) -> Option<StoreHash> {
-        let node = self.g.node_weight(nid)?;
-
+    pub fn hash_node_inputs(&self, nid: NodeIndex) -> Option<StoreHash>
+    where
+        T: ReadOutHash,
+    {
+        // NOTE: we intentionally don't hash the node name
         use blake2::digest::Update;
-
-        // for FOD's we only care about the expected hash
-        if let Some(x) = node.expect_hash {
-            return Some(x);
-        }
-
-        let incoming = self.g.edges_directed(nid, Direction::Incoming);
+        use ciborium::ser::into_writer as cbor_write;
+        let node = self.g.node_weight(nid)?;
         let mut hasher = StoreHash::get_hasher();
-        // gather input data
-        hasher.update(&*node.name);
-        hasher.update([0]);
-        let mut ser_cmd = Vec::new();
-        ciborium::ser::into_writer(&node.command, &mut ser_cmd).unwrap();
-        hasher.update(ser_cmd);
+        let mut tmp_ser = Vec::new();
+        match &node.kind {
+            NodeKind::Run { command } => {
+                hasher.update(b"run\0");
+                cbor_write(command, &mut tmp_ser)
+            }
+            NodeKind::UnDump { dat } => {
+                hasher.update(b"undump\0");
+                cbor_write(dat, &mut tmp_ser)
+            }
+            NodeKind::Dump { id } => {
+                hasher.update(b"dump\0");
+                cbor_write(id, &mut tmp_ser)
+            }
+            NodeKind::NotifyAbtStorePaths { id } => {
+                hasher.update(b"notify-abt-store-paths\0");
+                cbor_write(id, &mut tmp_ser)
+            }
+        }
+        .unwrap();
+        hasher.update(tmp_ser);
+        let _ = tmp_ser;
         hasher.update([0]);
 
-        for i in incoming {
+        for i in self.g.edges_directed(nid, Direction::Incoming) {
             if let Edge::Placeholder(plh) = &i.weight() {
                 hasher.update(&*plh);
                 hasher.update([0]);
-                hasher.update(&self.hash_node_inputs(i.source())?.0);
+                hasher.update(
+                    self.g
+                        .node_weight(i.source())
+                        .unwrap()
+                        .rest
+                        .read_out_hash()?,
+                );
                 hasher.update([0]);
             }
         }
