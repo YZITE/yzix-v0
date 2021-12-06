@@ -125,13 +125,13 @@ impl<T> Graph<T> {
         let _ = tmp_ser;
         hasher.update([0]);
 
-        for i in self.g.edges_directed(nid, Direction::Incoming) {
+        for i in self.g.edges(nid) {
             if let Edge::Placeholder(plh) = &i.weight() {
                 hasher.update(&*plh);
                 hasher.update([0]);
                 hasher.update(
                     self.g
-                        .node_weight(i.source())
+                        .node_weight(i.target())
                         .unwrap()
                         .rest
                         .read_out_hash()?,
@@ -149,7 +149,7 @@ impl<T> Graph<T> {
         // ignore input edges, transfer output edges
         let mut oedges: HashMap<_, _> = self
             .g
-            .edges(from)
+            .edges_directed(from, Direction::Incoming)
             .map(|i| (i.target(), i.id()))
             .collect::<Vec<_>>()
             // break reference to `self.g`
@@ -160,8 +160,8 @@ impl<T> Graph<T> {
         // remove old node, if this yields then oedges is empty
         let ret = self.g.remove_node(from)?;
         // prune unnecessary edges
-        for i in self.g.edges(to) {
-            if let Some(x) = oedges.remove(&i.target()) {
+        for i in self.g.edges_directed(to, Direction::Incoming) {
+            if let Some(x) = oedges.remove(&i.source()) {
                 if &x == i.weight() {
                     // edge identical, drop it
                     continue;
@@ -173,7 +173,7 @@ impl<T> Graph<T> {
         }
         // transfer remaining edges
         for (trg, e) in oedges {
-            self.g.add_edge(to, trg, e);
+            self.g.add_edge(trg, to, e);
         }
         // do not reset input hash cache, it only depends on the inputs,
         // which we just leave as-is
@@ -212,11 +212,11 @@ impl<T> Graph<T> {
                     continue;
                 }
 
-                // contains incoming half-edges
+                // contains outgoing half-edges
                 let res_inps: HashMap<_, _> = rhs
                     .g
-                    .edges_directed(i, Direction::Incoming)
-                    .flat_map(|ie| ret.get(&ie.source()).map(|&x| (x, ie.weight())))
+                    .edges(i)
+                    .flat_map(|ie| ret.get(&ie.target()).map(|&x| (x, ie.weight())))
                     .collect();
 
                 let ni = rhs.g.node_weight(i).unwrap();
@@ -228,8 +228,8 @@ impl<T> Graph<T> {
                     if ni == self.g.node_weight(j).unwrap()
                         && self
                             .g
-                            .edges_directed(i, Direction::Incoming)
-                            .map(|je| (je.source(), je.weight()))
+                            .edges(i)
+                            .map(|je| (je.target(), je.weight()))
                             .collect::<HashMap<_, _>>()
                             == res_inps
                     {
@@ -243,7 +243,7 @@ impl<T> Graph<T> {
                 let j = self.g.add_node(ni.clone().map(Into::into));
                 ret.insert(i, j);
 
-                // copy ingoing edges
+                // copy outgoing edges
                 for (src, wei) in res_inps {
                     self.g.add_edge(j, src, wei.clone());
                 }
