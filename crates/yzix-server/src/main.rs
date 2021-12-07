@@ -5,15 +5,11 @@
     unconditional_recursion
 )]
 
-use async_channel::{unbounded, Receiver, Sender};
-use async_ctrlc::CtrlC;
+use async_channel::{unbounded, Sender};
 use async_lock::Semaphore;
 use async_net::TcpListener;
-use async_process::{Command, ExitStatus};
-use futures_lite::io::AsyncWriteExt;
-use serde::{Deserialize, Serialize};
-use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use async_process::Command;
+use std::collections::HashMap;
 use std::sync::Arc;
 use yz_server_executor::Executor;
 use yzix_core::build_graph::{self, Direction, EdgeRef, NodeIndex};
@@ -182,7 +178,7 @@ async fn push_response(g_: &build_graph::Graph<NodeMeta>, nid: NodeIndex, kind: 
     };
     let mut cont: futures_util::stream::FuturesUnordered<_> =
         n.rest.log.iter().map(|li| li.send(resp.clone())).collect();
-    while let Some(_) = cont.next().await {}
+    while cont.next().await.is_some() {}
 }
 
 fn eval_pat(
@@ -320,7 +316,8 @@ async fn schedule(
                                     dump: None,
                                 }),
                             })
-                            .await;
+                            .await
+                            .unwrap();
                         return;
                     }
                 }
@@ -354,7 +351,6 @@ async fn schedule(
             expect_hash,
         }) => {
             let outhash = StoreHash::hash_complex(&dump);
-            let mut success = true;
             let mut det = Ok(BuiltItem {
                 inhash,
                 dump: Some(dump),
@@ -391,7 +387,7 @@ async fn schedule(
                         }
                     }
                     if success {
-                        push_response(&graph, nid, ResponseKind::Dump(dump.clone())).await;
+                        push_response(graph, nid, ResponseKind::Dump(dump.clone())).await;
                         Ok(BuiltItem {
                             inhash,
                             dump: Some(dump),
@@ -408,7 +404,7 @@ async fn schedule(
             // the output is already set to failed, we just need
             // to send the appropriate log message
             push_response(
-                &graph,
+                graph,
                 nid,
                 ResponseKind::LogLine {
                     bldname: graph.g[nid].name.clone(),
@@ -420,7 +416,8 @@ async fn schedule(
         }
     };
     // this is necessary to properly update the progress bar
-    mains.send(MainMessage::Done { nid, det }).await;
+    // and serialization to local store
+    mains.send(MainMessage::Done { nid, det }).await.unwrap();
 }
 
 fn main() {
@@ -473,12 +470,13 @@ fn main() {
             // wait for shutdown signal
             async_ctrlc::CtrlC::new().unwrap().await;
             let _ = mains2.send(MainMessage::Shutdown).await;
-        });
+        })
+        .detach();
 
         let mains2 = mains.clone();
         let pbar2 = pbar.clone();
         ex.spawn(async move {
-            while let Ok((stream, addr)) = listener.accept().await {
+            while let Ok((stream, _)) = listener.accept().await {
                 use futures_lite::{future::zip, AsyncReadExt, AsyncWriteExt};
                 // TODO: auth
                 let mut stream2 = stream.clone();
@@ -495,7 +493,7 @@ fn main() {
                             // TODO: make sure that the length isn't too big
                             let mut buf: Vec<u8> = Vec::new();
                             buf.resize(len.try_into().unwrap(), 0);
-                            if !stream.read_exact(&mut buf[..]).await.is_ok() {
+                            if stream.read_exact(&mut buf[..]).await.is_err() {
                                 break;
                             }
                             use proto::ControlCommand as C;
@@ -545,7 +543,8 @@ fn main() {
                 )
                 .await;
             }
-        });
+        })
+        .detach();
 
         use MainMessage as MM;
         while let Ok(x) = mainr.recv().await {
@@ -580,38 +579,36 @@ fn main() {
                                 let ohs = outhash.to_string();
                                 let dstpath = store_path.join(&ohs).into_std_path_buf();
                                 let mut do_write = true;
-                                if dstpath.exists() {
-                                    if auto_repair {
-                                        let on_disk_dump = match Dump::read_from_path(&dstpath) {
-                                            Ok(on_disk_dump) => {
-                                                let on_disk_hash =
-                                                    StoreHash::hash_complex(&on_disk_dump);
-                                                if on_disk_hash != outhash {
-                                                    pbar.println(format!(
-                                                        "WARNING: detected data corruption @ {}",
-                                                        outhash
-                                                    ));
-                                                } else if on_disk_dump != dump {
-                                                    pbar.println(format!(
-                                                        "ERROR: detected hash collision @ {}",
-                                                        outhash
-                                                    ));
-                                                    node.rest.output = Output::Failed(
-                                                        OutputError::HashCollision(outhash),
-                                                    );
-                                                    continue;
-                                                } else {
-                                                    do_write = false;
-                                                }
-                                            }
-                                            Err(e) => {
+                                if dstpath.exists() && auto_repair {
+                                    match Dump::read_from_path(&dstpath) {
+                                        Ok(on_disk_dump) => {
+                                            let on_disk_hash =
+                                                StoreHash::hash_complex(&on_disk_dump);
+                                            if on_disk_hash != outhash {
                                                 pbar.println(format!(
-                                                    "WARNING: error while dumping @ {}: {}",
-                                                    outhash, e
+                                                    "WARNING: detected data corruption @ {}",
+                                                    outhash
                                                 ));
+                                            } else if on_disk_dump != dump {
+                                                pbar.println(format!(
+                                                    "ERROR: detected hash collision @ {}",
+                                                    outhash
+                                                ));
+                                                node.rest.output = Output::Failed(
+                                                    OutputError::HashCollision(outhash),
+                                                );
+                                                continue;
+                                            } else {
+                                                do_write = false;
                                             }
-                                        };
-                                    }
+                                        }
+                                        Err(e) => {
+                                            pbar.println(format!(
+                                                "WARNING: error while dumping @ {}: {}",
+                                                outhash, e
+                                            ));
+                                        }
+                                    };
                                 }
                                 if do_write {
                                     if let Err(e) = dump.write_to_path(&dstpath, true) {
@@ -662,7 +659,7 @@ fn main() {
             // garbage collection
             if graph.g.node_count() != 0 {
                 // search unnecessary nodes
-                let gc: Vec<_> = graph
+                let cnt = graph
                     .g
                     .node_indices()
                     .filter(|&i| {
@@ -679,8 +676,10 @@ fn main() {
                             )
                         })
                     })
-                    .collect();
-                let cnt = gc.into_iter().map(|i| graph.g.remove_node(i)).count();
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .map(|i| graph.g.remove_node(i))
+                    .count();
                 if cnt > 0 {
                     // DEBUG
                     pbar.println(format!("pruned {} node(s)", cnt));
