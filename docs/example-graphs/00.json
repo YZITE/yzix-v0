@@ -1,0 +1,57 @@
+{
+  "nodes": [
+    {
+      "name": "hi",
+      "kind": {
+        "type": "undump",
+        "dat": {
+          "type": "regular",
+          "executable": true,
+          "contents": [
+            101,
+            99,
+            104,
+            111,
+            32,
+            72,
+            105
+          ]
+        }
+      },
+      "logtag": 1,
+      "rest": null
+    },
+    {
+      "name": "use hi",
+      "kind": {
+        "type": "run",
+        "command": [
+          [
+            {
+              "String": "bash"
+            }
+          ],
+          [
+            {
+              "Placeholder": "hiinp"
+            }
+          ]
+        ],
+        "envs": {}
+      },
+      "logtag": 2,
+      "rest": null
+    }
+  ],
+  "node_holes": [],
+  "edge_property": "directed",
+  "edges": [
+    [
+      1,
+      0,
+      {
+        "Placeholder": "hiinp"
+      }
+    ]
+  ]
+}
