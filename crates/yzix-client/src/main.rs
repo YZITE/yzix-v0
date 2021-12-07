@@ -34,6 +34,7 @@ fn main() {
                 std::fs::File::open(scmd.value_of("GRAPH").unwrap()).expect("unable to open graph"),
             ))
             .expect("unable to parse graph from file");
+        println!("graph = {:?}", graph);
         let schedule_cmd = proto::ControlCommand::Schedule(graph);
         let mut cmd_ser = Vec::new();
         ciborium::ser::into_writer(&schedule_cmd, &mut cmd_ser)
@@ -85,5 +86,23 @@ fn main() {
                 }
             }
         }
+    } else {
+        // primt some example
+        use yzix_core::{build_graph as bg, store::Dump};
+        let mut graph = yzix_core::build_graph::Graph::<()>::default();
+        let a = graph.g.add_node(bg::Node {
+            name: "hi".to_string(),
+            kind: bg::NodeKind::UnDump { dat: Dump::Regular { executable: true, contents: "echo Hi".to_string().into() }, },
+            logtag: 1,
+            rest: (),
+        });
+        let b = graph.g.add_node(bg::Node {
+            name: "use hi".to_string(),
+            kind: bg::NodeKind::Run { command: vec![vec![bg::CmdArgSnip::String("bash".to_string())], vec![bg::CmdArgSnip::Placeholder("hiinp".to_string())]], envs: Default::default() },
+            logtag: 2,
+            rest: (),
+        });
+        graph.g.add_edge(b, a, bg::Edge::Placeholder("hiinp".to_string()));
+        serde_json::ser::to_writer_pretty(std::io::stdout(), &graph).unwrap();
     }
 }
