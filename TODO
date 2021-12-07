@@ -8,3 +8,4 @@ a few things would be nice to have or somewhat important:
 - reattaching to logs
   (partially done because we can now attach multiple loggers)
 - auto-repair of broken store entries
+- build server cluster support (distcc-like)

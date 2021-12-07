@@ -115,7 +115,7 @@ impl<T> Default for Graph<T> {
 }
 
 impl<T> Graph<T> {
-    pub fn hash_node_inputs(&self, nid: NodeIndex) -> Option<StoreHash>
+    pub fn hash_node_inputs(&self, nid: NodeIndex, seed: &[u8]) -> Option<StoreHash>
     where
         T: ReadOutHash,
     {
@@ -125,6 +125,7 @@ impl<T> Graph<T> {
         let node = self.g.node_weight(nid)?;
         let mut hasher = StoreHash::get_hasher();
         let mut tmp_ser = Vec::new();
+        hasher.update(seed);
         match &node.kind {
             NodeKind::Run { command, envs } => {
                 hasher.update(b"run\0");

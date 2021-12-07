@@ -53,6 +53,9 @@ pub enum OutputError {
     #[error("dump failed: {0}")]
     DumpFailed(String),
 
+    #[error("hash collision at {0}")]
+    HashCollision(StoreHash),
+
     #[error("an underspecified error happened: {0}")]
     Unknown(String),
 }

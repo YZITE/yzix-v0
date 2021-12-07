@@ -933,7 +933,6 @@ dependencies = [
  "futures-util",
  "indicatif",
  "num_cpus",
- "once_cell",
  "serde",
  "tempfile",
  "thiserror",
