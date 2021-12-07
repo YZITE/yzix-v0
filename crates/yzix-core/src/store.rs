@@ -72,7 +72,7 @@ pub enum Dump {
     Directory(std::collections::BTreeMap<String, Dump>),
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, thiserror::Error)]
 #[error("{real_path}: {kind}")]
 pub struct Error {
     pub real_path: std::path::PathBuf,
@@ -80,7 +80,7 @@ pub struct Error {
     pub kind: ErrorKind,
 }
 
-#[derive(Clone, Debug, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, thiserror::Error)]
 pub enum ErrorKind {
     #[error("unable to convert symlink destination to UTF-8")]
     NonUtf8SymlinkTarget,
@@ -88,8 +88,8 @@ pub enum ErrorKind {
     #[error("unable to convert file name to UTF-8")]
     NonUtf8Basename,
 
-    #[error("got unknown file type {0:?}")]
-    UnknownFileType(std::fs::FileType),
+    #[error("got unknown file type {0}")]
+    UnknownFileType(String),
 
     #[error("directory entries with empty names are invalid")]
     EmptyBasename,
@@ -101,23 +101,38 @@ pub enum ErrorKind {
     #[error("store dump declined to overwrite file")]
     /// NOTE: this obviously gets attached to the directory name
     OverwriteDeclined,
+
+    #[error("I/O error: {desc}")]
+    // NOTE: the `desc` already contains the os error code, don't print it 2 times.
+    IoMisc { errno: Option<i32>, desc: String },
+}
+
+impl From<std::io::Error> for ErrorKind {
+    fn from(e: std::io::Error) -> ErrorKind {
+        ErrorKind::IoMisc {
+            errno: e.raw_os_error(),
+            desc: e.to_string(),
+        }
+    }
 }
 
 #[allow(unused_variables)]
 impl Dump {
-    pub fn read_from_path(x: &std::path::Path) -> std::io::Result<Self> {
-        let meta = fs::symlink_metadata(x)?;
+    pub fn read_from_path(x: &std::path::Path) -> Result<Self, Error> {
+        let mapef = |e: std::io::Error| Error {
+            real_path: x.to_path_buf(),
+            kind: e.into(),
+        };
+        let meta = fs::symlink_metadata(x).map_err(&mapef)?;
         let ty = meta.file_type();
         Ok(if ty.is_symlink() {
-            let target = fs::read_link(x)?.try_into().map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    Error {
-                        real_path: x.to_path_buf(),
-                        kind: ErrorKind::NonUtf8SymlinkTarget,
-                    },
-                )
-            })?;
+            let target = fs::read_link(x)
+                .map_err(&mapef)?
+                .try_into()
+                .map_err(|_| Error {
+                    real_path: x.to_path_buf(),
+                    kind: ErrorKind::NonUtf8SymlinkTarget,
+                })?;
             let to_dir = std::fs::metadata(x)
                 .map(|y| y.file_type().is_dir())
                 .unwrap_or(false);
@@ -134,75 +149,67 @@ impl Dump {
 
                     y
                 },
-                contents: std::fs::read(x)?,
+                contents: std::fs::read(x).map_err(&mapef)?,
             }
         } else if ty.is_dir() {
             Dump::Directory(
-                std::fs::read_dir(x)?
+                std::fs::read_dir(x)
+                    .map_err(&mapef)?
                     .map(|entry| {
-                        let entry = entry?;
-                        let name = entry.file_name().into_string().map_err(|_| {
-                            std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                Error {
-                                    real_path: entry.path(),
-                                    kind: ErrorKind::NonUtf8Basename,
-                                },
-                            )
+                        let entry = entry.map_err(&mapef)?;
+                        let name = entry.file_name().into_string().map_err(|_| Error {
+                            real_path: entry.path(),
+                            kind: ErrorKind::NonUtf8Basename,
                         })?;
                         let val = Dump::read_from_path(&entry.path())?;
-                        Ok::<_, std::io::Error>((name, val))
+                        Ok((name, val))
                     })
-                    .collect::<Result<_, _>>()?,
+                    .collect::<Result<_, Error>>()?,
             )
         } else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                Error {
-                    real_path: x.to_path_buf(),
-                    kind: ErrorKind::UnknownFileType(ty),
-                },
-            ));
+            return Err(Error {
+                real_path: x.to_path_buf(),
+                kind: ErrorKind::UnknownFileType(format!("{:?}", ty)),
+            });
         })
     }
 
     /// we require that the parent directory already exists,
     /// and will override the target path `x` if it already exists.
-    pub fn write_to_path(&self, x: &std::path::Path, force: bool) -> std::io::Result<()> {
+    pub fn write_to_path(&self, x: &std::path::Path, force: bool) -> Result<(), Error> {
         // one second past epoch, necessary for e.g. GNU make to recognize
         // the dumped files as "oldest"
         // TODO: when https://github.com/alexcrichton/filetime/pull/75 is merged,
         //   upgrade `filetime` and make this a global `const` binding.
         let reftime = filetime::FileTime::from_unix_time(1, 0);
 
-        use std::io::{Error as IoError, ErrorKind as IoErrorKind};
+        use std::io::ErrorKind as IoErrorKind;
+
+        let mapef = |e: std::io::Error| Error {
+            real_path: x.to_path_buf(),
+            kind: e.into(),
+        };
 
         if let Ok(y) = fs::symlink_metadata(x) {
             if !y.is_dir() {
                 if force {
                     // TODO: optimize for the case when the file is exactly the same
-                    fs::remove_file(x)?;
+                    fs::remove_file(x).map_err(&mapef)?;
                 } else {
-                    return Err(IoError::new(
-                        IoErrorKind::AlreadyExists,
-                        Error {
-                            real_path: x.to_path_buf(),
-                            kind: ErrorKind::OverwriteDeclined,
-                        },
-                    ));
+                    return Err(Error {
+                        real_path: x.to_path_buf(),
+                        kind: ErrorKind::OverwriteDeclined,
+                    });
                 }
             } else if let Dump::Directory(_) = self {
                 // passthrough
             } else if force {
-                fs::remove_dir_all(x)?;
+                fs::remove_dir_all(x).map_err(&mapef)?;
             } else {
-                return Err(IoError::new(
-                    IoErrorKind::AlreadyExists,
-                    Error {
-                        real_path: x.to_path_buf(),
-                        kind: ErrorKind::OverwriteDeclined,
-                    },
-                ));
+                return Err(Error {
+                    real_path: x.to_path_buf(),
+                    kind: ErrorKind::OverwriteDeclined,
+                });
             }
         }
 
@@ -212,28 +219,29 @@ impl Dump {
                 {
                     use std::os::windows::fs as wfs;
                     if to_dir {
-                        wfs::symlink_dir(&target, x)?;
+                        wfs::symlink_dir(&target, x)
                     } else {
-                        wfs::symlink_file(&target, x)?;
+                        wfs::symlink_file(&target, x)
                     }
+                    .map_err(&mapef)?;
                 }
 
                 #[cfg(unix)]
                 {
-                    std::os::unix::fs::symlink(&target, x)?;
+                    std::os::unix::fs::symlink(&target, x).map_err(&mapef)?;
                 }
 
                 #[cfg(not(any(windows, unix)))]
-                return Err(IoError::new(
-                    IoErrorKind::InvalidInput,
-                    "symlinks aren't supported on this platform",
-                ));
+                return Err(Error {
+                    real_path: x.to_path_buf(),
+                    kind: ErrorKind::SymlinksUnsupported,
+                });
             }
             Dump::Regular {
                 executable,
                 contents,
             } => {
-                fs::write(x, contents)?;
+                fs::write(x, contents).map_err(&mapef)?;
 
                 #[cfg(unix)]
                 fs::set_permissions(
@@ -243,7 +251,8 @@ impl Dump {
                     } else {
                         0o444
                     }),
-                )?;
+                )
+                .map_err(&mapef)?;
             }
             Dump::Directory(contents) => {
                 if let Err(e) = fs::create_dir(&x) {
@@ -251,8 +260,8 @@ impl Dump {
                         // the check at the start of the function should have taken
                         // care of the annoying edge cases.
                         // x is thus already a directory
-                        for entry in fs::read_dir(x)? {
-                            let entry = entry?;
+                        for entry in fs::read_dir(x).map_err(&mapef)? {
+                            let entry = entry.map_err(&mapef)?;
                             if entry
                                 .file_name()
                                 .into_string()
@@ -263,18 +272,16 @@ impl Dump {
                                 // file does not exist in the expected contents...
                                 let real_path = entry.path();
                                 if !force {
-                                    return Err(IoError::new(
-                                        IoErrorKind::AlreadyExists,
-                                        Error {
-                                            real_path,
-                                            kind: ErrorKind::OverwriteDeclined,
-                                        },
-                                    ));
-                                } else if entry.file_type()?.is_dir() {
+                                    return Err(Error {
+                                        real_path,
+                                        kind: ErrorKind::OverwriteDeclined,
+                                    });
+                                } else if entry.file_type().map_err(&mapef)?.is_dir() {
                                     fs::remove_dir_all(real_path)
                                 } else {
                                     fs::remove_file(real_path)
-                                }?;
+                                }
+                                .map_err(&mapef)?;
                             }
                         }
                     }
@@ -282,13 +289,10 @@ impl Dump {
                 let mut xs = x.to_path_buf();
                 for (name, val) in contents {
                     if name.is_empty() {
-                        return Err(IoError::new(
-                            IoErrorKind::InvalidInput,
-                            Error {
-                                real_path: x.to_path_buf(),
-                                kind: ErrorKind::EmptyBasename,
-                            },
-                        ));
+                        return Err(Error {
+                            real_path: x.to_path_buf(),
+                            kind: ErrorKind::EmptyBasename,
+                        });
                     }
                     xs.push(name);
                     // this call also deals with cases where the file already exists
@@ -297,6 +301,6 @@ impl Dump {
                 }
             }
         }
-        filetime::set_symlink_file_times(x, reftime, reftime)
+        filetime::set_symlink_file_times(x, reftime, reftime).map_err(&mapef)
     }
 }

@@ -53,11 +53,11 @@ pub enum OutputError {
     #[error("given command is empty")]
     EmptyCommand,
 
-    #[error("dump failed: {0}")]
-    DumpFailed(String),
-
     #[error("hash collision at {0}")]
     HashCollision(StoreHash),
+
+    #[error("store error: {0}")]
+    Store(#[from] crate::store::Error),
 
     #[error("an underspecified error happened: {0}")]
     Unknown(String),
@@ -67,12 +67,6 @@ impl From<std::io::Error> for OutputError {
     fn from(e: std::io::Error) -> OutputError {
         if let Some(x) = e.raw_os_error() {
             OutputError::Io(x)
-        } else if let Some(x) = e.get_ref() {
-            if let Some(y) = x.downcast_ref::<crate::store::Error>() {
-                OutputError::DumpFailed(y.to_string())
-            } else {
-                OutputError::Unknown(e.to_string())
-            }
         } else {
             OutputError::Unknown(e.to_string())
         }
