@@ -460,6 +460,8 @@ fn main() {
     let store_path = Utf8PathBuf::from(matches.value_of("store").unwrap());
     let auto_repair = matches.is_present("auto-repair");
 
+    std::fs::create_dir_all(&store_path).expect("unable to create store dir");
+
     let cpucnt = num_cpus::get();
     let pbar = indicatif::ProgressBar::new(0);
     let ex = Arc::new(yz_server_executor::ServerExecutor::with_threads(cpucnt));
