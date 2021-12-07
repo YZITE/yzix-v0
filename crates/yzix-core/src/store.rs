@@ -80,7 +80,7 @@ pub struct Error {
     pub kind: ErrorKind,
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, thiserror::Error)]
 pub enum ErrorKind {
     #[error("unable to convert symlink destination to UTF-8")]
     NonUtf8SymlinkTarget,
