@@ -595,36 +595,40 @@ fn main() {
                                 let ohs = outhash.to_string();
                                 let dstpath = store_path.join(&ohs).into_std_path_buf();
                                 let mut do_write = true;
-                                if dstpath.exists() && auto_repair {
-                                    match Dump::read_from_path(&dstpath) {
-                                        Ok(on_disk_dump) => {
-                                            let on_disk_hash =
-                                                StoreHash::hash_complex(&on_disk_dump);
-                                            if on_disk_hash != outhash {
+                                if dstpath.exists() {
+                                    if auto_repair {
+                                        match Dump::read_from_path(&dstpath) {
+                                            Ok(on_disk_dump) => {
+                                                let on_disk_hash =
+                                                    StoreHash::hash_complex(&on_disk_dump);
+                                                if on_disk_hash != outhash {
+                                                    pbar.println(format!(
+                                                        "WARNING: detected data corruption @ {}",
+                                                        outhash
+                                                    ));
+                                                } else if on_disk_dump != dump {
+                                                    pbar.println(format!(
+                                                        "ERROR: detected hash collision @ {}",
+                                                        outhash
+                                                    ));
+                                                    node.rest.output = Output::Failed(
+                                                        OutputError::HashCollision(outhash),
+                                                    );
+                                                    continue;
+                                                } else {
+                                                    do_write = false;
+                                                }
+                                            }
+                                            Err(e) => {
                                                 pbar.println(format!(
-                                                    "WARNING: detected data corruption @ {}",
-                                                    outhash
+                                                    "WARNING: error while dumping @ {}: {}",
+                                                    outhash, e
                                                 ));
-                                            } else if on_disk_dump != dump {
-                                                pbar.println(format!(
-                                                    "ERROR: detected hash collision @ {}",
-                                                    outhash
-                                                ));
-                                                node.rest.output = Output::Failed(
-                                                    OutputError::HashCollision(outhash),
-                                                );
-                                                continue;
-                                            } else {
-                                                do_write = false;
                                             }
                                         }
-                                        Err(e) => {
-                                            pbar.println(format!(
-                                                "WARNING: error while dumping @ {}: {}",
-                                                outhash, e
-                                            ));
-                                        }
-                                    };
+                                    } else {
+                                        do_write = false;
+                                    }
                                 }
                                 if do_write {
                                     if let Err(e) = dump.write_to_path(&dstpath, true) {
