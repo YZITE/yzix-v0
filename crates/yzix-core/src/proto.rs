@@ -16,8 +16,8 @@ pub enum ControlCommand {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Response {
-    tag: u64,
-    kind: ResponseKind,
+    pub tag: u64,
+    pub kind: ResponseKind,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -27,7 +27,7 @@ pub enum ResponseKind {
     OutputNotify(Result<StoreHash, OutputError>),
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, thiserror::Error)]
 pub enum OutputError {
     #[error("command returned with exit code {0}")]
     Exit(i32),

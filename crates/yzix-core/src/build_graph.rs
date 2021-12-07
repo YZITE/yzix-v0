@@ -1,6 +1,6 @@
 use crate::store::Hash as StoreHash;
 pub use petgraph::stable_graph::{NodeIndex, StableGraph as RawGraph};
-use petgraph::{visit::EdgeRef, Direction};
+pub use petgraph::{visit::EdgeRef, Direction};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -45,7 +45,7 @@ pub enum NodeKind {
     /// when this node is reached, send a combined dump of all
     /// inputs (with each input represented as an entry in the
     /// top-level, which is a directory
-    Dump { id: u64 },
+    Dump,
 }
 
 impl<T, U> std::cmp::PartialEq<Node<U>> for Node<T> {
@@ -101,9 +101,17 @@ pub trait ReadOutHash {
     fn read_out_hash(&self) -> Option<StoreHash>;
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Graph<T> {
     pub g: RawGraph<Node<T>, Edge>,
+}
+
+impl<T> Default for Graph<T> {
+    fn default() -> Self {
+        Self {
+            g: Default::default(),
+        }
+    }
 }
 
 impl<T> Graph<T> {
@@ -199,7 +207,12 @@ impl<T> Graph<T> {
     /// our main job is to deduplicate identical nodes
     /// if the return value contains lesser entries than rhs contains nodes,
     /// then some nodes failed the conversion (e.g. the graph contained a cycle)
-    pub fn take_and_merge<U, MF, AF>(&mut self, rhs: Graph<U>, mut mapf: MF, attachf: AF) -> HashMap<NodeIndex, NodeIndex>
+    pub fn take_and_merge<U, MF, AF>(
+        &mut self,
+        rhs: Graph<U>,
+        mut mapf: MF,
+        attachf: AF,
+    ) -> HashMap<NodeIndex, NodeIndex>
     where
         MF: FnMut(&U) -> T,
         AF: Fn(&mut T),
@@ -231,7 +244,9 @@ impl<T> Graph<T> {
                 // contains outgoing half-edges
                 let res_inps = rhs.g.edges(i);
                 let res_inps_cnt = res_inps.clone().count();
-                let res_inps: HashMap<_, _> = res_inps.flat_map(|ie| ret.get(&ie.target()).map(|&x| (x, ie.weight()))).collect();
+                let res_inps: HashMap<_, _> = res_inps
+                    .flat_map(|ie| ret.get(&ie.target()).map(|&x| (x, ie.weight())))
+                    .collect();
                 if res_inps.len() != res_inps_cnt {
                     // contains unresolved inputs
                     continue;
