@@ -25,6 +25,7 @@ pub struct Node<T> {
 // I don't think they are strictly necessary, and if that
 // is proved wrong, we may always add them later.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase", tag = "type")]
 pub enum NodeKind {
     Run {
         /// the first level of Vec represents argv[],
