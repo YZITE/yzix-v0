@@ -183,7 +183,7 @@ async fn handle_process(
 
 async fn push_response(g_: &build_graph::Graph<NodeMeta>, nid: NodeIndex, kind: ResponseKind) {
     use futures_lite::stream::StreamExt;
-    let n = &g_.g[nid];
+    let n = &g_.0[nid];
     let resp = Response {
         tag: n.logtag,
         kind: kind.clone(),
@@ -222,7 +222,7 @@ fn try_make_work_intern(
     g_: &build_graph::Graph<NodeMeta>,
     nid: NodeIndex,
 ) -> Option<Result<WorkItem, OutputError>> {
-    let pnw = &g_.g[nid];
+    let pnw = &g_.0[nid];
     if pnw.rest.output != Output::NotStarted {
         return None;
     }
@@ -232,9 +232,9 @@ fn try_make_work_intern(
     let mut rphs = HashMap::new();
     let mut expect_hash = None;
 
-    for e in g_.g.edges(nid) {
+    for e in g_.0.edges(nid) {
         let (ew, et) = (e.weight(), e.target());
-        if let Output::Success(h) = g_.g[et].rest.output {
+        if let Output::Success(h) = g_.0[et].rest.output {
             match ew {
                 build_graph::Edge::AssertEqual => {
                     if let Some(x) = expect_hash {
@@ -337,14 +337,14 @@ async fn schedule(
         }
     }
 
-    graph.g[nid].rest.output = Output::Scheduled;
+    graph.0[nid].rest.output = Output::Scheduled;
 
     let det = match ret {
         Ok(WorkItem {
             kind: WorkItemKind::Run(wir),
             expect_hash,
         }) => {
-            let ni = &graph.g[nid];
+            let ni = &graph.0[nid];
             let logtag = ni.logtag;
             let name = ni.name.clone();
             let log = ni.rest.log.clone();
@@ -419,7 +419,7 @@ async fn schedule(
                 graph,
                 nid,
                 ResponseKind::LogLine {
-                    bldname: graph.g[nid].name.clone(),
+                    bldname: graph.0[nid].name.clone(),
                     content: format!("ERROR: {}", oe),
                 },
             )
@@ -581,7 +581,7 @@ fn main() {
                     }
                 }
                 MM::Done { nid, det } => {
-                    let mut node = &mut graph.g[nid];
+                    let mut node = &mut graph.0[nid];
                     match det {
                         Ok(BuiltItem {
                             inhash,
@@ -650,10 +650,10 @@ fn main() {
                             node.rest.output = Output::Success(outhash);
                             // schedule now available jobs
                             let mut next_nodes = graph
-                                .g
+                                .0
                                 .neighbors_directed(nid, Direction::Incoming)
                                 .detach();
-                            while let Some(nid2) = next_nodes.next_node(&graph.g) {
+                            while let Some(nid2) = next_nodes.next_node(&graph.0) {
                                 schedule(&store_path, ex, &mains, &jobsem, &mut graph, nid2).await;
                             }
                         }
@@ -671,27 +671,27 @@ fn main() {
             }
 
             // garbage collection
-            if graph.g.node_count() == 0 {
+            if graph.0.node_count() == 0 {
                 continue;
             }
 
             // propagate failures
             for i in graph
-                .g
+                .0
                 .node_indices()
-                .filter(|&i| matches!(graph.g[i].rest.output, Output::Failed(_)))
+                .filter(|&i| matches!(graph.0[i].rest.output, Output::Failed(_)))
                 .collect::<Vec<_>>()
             {
-                let mut ineigh = graph.g.neighbors_directed(i, Direction::Incoming).detach();
-                while let Some((je, js)) = ineigh.next(&graph.g) {
-                    let mo = &mut graph.g[js].rest.output;
+                let mut ineigh = graph.0.neighbors_directed(i, Direction::Incoming).detach();
+                while let Some((je, js)) = ineigh.next(&graph.0) {
+                    let mo = &mut graph.0[js].rest.output;
                     if *mo == Output::NotStarted {
                         *mo = Output::Scheduled;
                         // keep pbar and such in sync
                         mains
                             .send(MainMessage::Done {
                                 nid: js,
-                                det: Err(OutputError::InputFailed(graph.g[je].clone())),
+                                det: Err(OutputError::InputFailed(graph.0[je].clone())),
                             })
                             .await
                             .unwrap();
@@ -701,31 +701,31 @@ fn main() {
 
             // search unnecessary nodes
             let cnt = graph
-                .g
+                .0
                 .node_indices()
                 .filter(|&i| {
                     matches!(
-                        graph.g[i].rest.output,
+                        graph.0[i].rest.output,
                         Output::Success(_) | Output::Failed(_)
                     )
                 })
                 .filter(|&i| {
                     graph
-                        .g
+                        .0
                         .edges_directed(i, Direction::Incoming)
-                        .all(|j| graph.g[j.source()].rest.output != Output::NotStarted)
+                        .all(|j| graph.0[j.source()].rest.output != Output::NotStarted)
                 })
                 .collect::<Vec<_>>()
                 .into_iter()
-                .map(|i| graph.g.remove_node(i))
+                .map(|i| graph.0.remove_node(i))
                 .inspect(|i| pbar.println(format!("PRUNED: {:?}", i)))
                 .count();
             if cnt > 0 {
                 // DEBUG
                 pbar.println(format!("pruned {} node(s)", cnt));
-                if graph.g.node_count() == 0 {
+                if graph.0.node_count() == 0 {
                     // reset to reclaim memory
-                    graph.g = Default::default();
+                    graph.0 = Default::default();
                 }
             }
         }

@@ -102,15 +102,11 @@ pub trait ReadOutHash {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct Graph<T> {
-    pub g: RawGraph<Node<T>, Edge>,
-}
+pub struct Graph<T>(pub RawGraph<Node<T>, Edge>);
 
 impl<T> Default for Graph<T> {
     fn default() -> Self {
-        Self {
-            g: Default::default(),
-        }
+        Self(Default::default())
     }
 }
 
@@ -122,7 +118,7 @@ impl<T> Graph<T> {
         // NOTE: we intentionally don't hash the node name
         use blake2::digest::Update;
         use ciborium::ser::into_writer as cbor_write;
-        let node = self.g.node_weight(nid)?;
+        let node = self.0.node_weight(nid)?;
         let mut hasher = StoreHash::get_hasher();
         let mut tmp_ser = Vec::new();
         hasher.update(seed);
@@ -149,12 +145,12 @@ impl<T> Graph<T> {
         }
         let _ = tmp_ser;
 
-        for i in self.g.edges(nid) {
+        for i in self.0.edges(nid) {
             if let Edge::Placeholder(plh) = &i.weight() {
                 hasher.update(&*plh);
                 hasher.update([0]);
                 hasher.update(
-                    self.g
+                    self.0
                         .node_weight(i.target())
                         .unwrap()
                         .rest
@@ -172,19 +168,19 @@ impl<T> Graph<T> {
     pub fn replace_node(&mut self, from: NodeIndex, to: NodeIndex) -> Option<Node<T>> {
         // ignore input edges, transfer output edges
         let mut oedges: HashMap<_, _> = self
-            .g
+            .0
             .edges_directed(from, Direction::Incoming)
             .map(|i| (i.target(), i.id()))
             .collect::<Vec<_>>()
-            // break reference to `self.g`
+            // break reference to `self.0`
             .into_iter()
-            .map(|(trg, i)| (trg, self.g.remove_edge(i).unwrap()))
+            .map(|(trg, i)| (trg, self.0.remove_edge(i).unwrap()))
             .filter(|&(trg, _)| trg != to)
             .collect();
         // remove old node, if this yields then oedges is empty
-        let ret = self.g.remove_node(from)?;
+        let ret = self.0.remove_node(from)?;
         // prune unnecessary edges
-        for i in self.g.edges_directed(to, Direction::Incoming) {
+        for i in self.0.edges_directed(to, Direction::Incoming) {
             if let Some(x) = oedges.remove(&i.source()) {
                 if &x == i.weight() {
                     // edge identical, drop it
@@ -197,7 +193,7 @@ impl<T> Graph<T> {
         }
         // transfer remaining edges
         for (trg, e) in oedges {
-            self.g.add_edge(trg, to, e);
+            self.0.add_edge(trg, to, e);
         }
         // do not reset input hash cache, it only depends on the inputs,
         // which we just leave as-is
@@ -222,7 +218,7 @@ impl<T> Graph<T> {
         // disable that for now, we really want node deduplication
         // and cycle detection
         /*
-        if self.g.node_count() == 0 {
+        if self.0.node_count() == 0 {
             *self = rhs;
             return self.node_indices().map(|i| (i, i)).collect();
         }
@@ -236,14 +232,14 @@ impl<T> Graph<T> {
             let ret_elems = ret.len();
 
             // handle all nodes with no unresolved inputs
-            'l_noinp: for i in rhs.g.node_indices() {
+            'l_noinp: for i in rhs.0.node_indices() {
                 if ret.contains_key(&i) {
                     // already handled
                     continue;
                 }
 
                 // contains outgoing half-edges
-                let res_inps = rhs.g.edges(i);
+                let res_inps = rhs.0.edges(i);
                 let res_inps_cnt = res_inps.clone().count();
                 let res_inps: HashMap<_, _> = res_inps
                     .flat_map(|ie| ret.get(&ie.target()).map(|&x| (x, ie.weight())))
@@ -253,15 +249,15 @@ impl<T> Graph<T> {
                     continue;
                 }
 
-                let ni = rhs.g.node_weight(i).unwrap();
+                let ni = rhs.0.node_weight(i).unwrap();
 
                 // check against all existing nodes
                 // we can't really cache that, because we modify it all the time...
-                for j in self.g.node_indices() {
+                for j in self.0.node_indices() {
                     // make sure that j also has the same inputs
-                    if ni == self.g.node_weight(j).unwrap()
+                    if ni == self.0.node_weight(j).unwrap()
                         && self
-                            .g
+                            .0
                             .edges(j)
                             .map(|je| (je.target(), je.weight()))
                             .collect::<HashMap<_, _>>()
@@ -269,18 +265,18 @@ impl<T> Graph<T> {
                     {
                         // we have found an identical node, merge
                         ret.insert(i, j);
-                        attachf(&mut self.g[j].rest);
+                        attachf(&mut self.0[j].rest);
                         continue 'l_noinp;
                     }
                 }
 
                 // move it
-                let j = self.g.add_node(ni.map_ref(&mut mapf));
+                let j = self.0.add_node(ni.map_ref(&mut mapf));
                 ret.insert(i, j);
 
                 // copy outgoing edges
                 for (src, wei) in res_inps {
-                    self.g.add_edge(j, src, wei.clone());
+                    self.0.add_edge(j, src, wei.clone());
                 }
             }
 
