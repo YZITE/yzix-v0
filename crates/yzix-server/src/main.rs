@@ -657,36 +657,61 @@ fn main() {
             }
 
             // garbage collection
-            if graph.g.node_count() != 0 {
-                // search unnecessary nodes
-                let cnt = graph
-                    .g
-                    .node_indices()
-                    .filter(|&i| {
-                        matches!(
-                            graph.g[i].rest.output,
-                            Output::Success(_) | Output::Failed(_)
-                        )
-                    })
-                    .filter(|&i| {
-                        graph.g.edges_directed(i, Direction::Incoming).all(|j| {
-                            matches!(
-                                graph.g[j.source()].rest.output,
-                                Output::Success(_) | Output::Failed(_)
-                            )
-                        })
-                    })
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .map(|i| graph.g.remove_node(i))
-                    .count();
-                if cnt > 0 {
-                    // DEBUG
-                    pbar.println(format!("pruned {} node(s)", cnt));
-                    if graph.g.node_count() == 0 {
-                        // reset to reclaim memory
-                        graph.g = Default::default();
+            if graph.g.node_count() == 0 {
+                continue;
+            }
+
+            // propagate failures
+            for i in graph
+                .g
+                .node_indices()
+                .filter(|&i| matches!(graph.g[i].rest.output, Output::Failed(_)))
+                .collect::<Vec<_>>()
+            {
+                let mut ineigh = graph.g.neighbors_directed(i, Direction::Incoming).detach();
+                while let Some((je, js)) = ineigh.next(&graph.g) {
+                    let mo = &mut graph.g[js].rest.output;
+                    if *mo == Output::NotStarted {
+                        *mo = Output::Scheduled;
+                        // keep pbar and such in sync
+                        mains
+                            .send(MainMessage::Done {
+                                nid: js,
+                                det: Err(OutputError::InputFailed(graph.g[je].clone())),
+                            })
+                            .await
+                            .unwrap();
                     }
+                }
+            }
+
+            // search unnecessary nodes
+            let cnt = graph
+                .g
+                .node_indices()
+                .filter(|&i| {
+                    matches!(
+                        graph.g[i].rest.output,
+                        Output::Success(_) | Output::Failed(_)
+                    )
+                })
+                .filter(|&i| {
+                    graph
+                        .g
+                        .edges_directed(i, Direction::Incoming)
+                        .all(|j| graph.g[j.source()].rest.output != Output::NotStarted)
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|i| graph.g.remove_node(i))
+                .inspect(|i| pbar.println(format!("PRUNED: {:?}", i)))
+                .count();
+            if cnt > 0 {
+                // DEBUG
+                pbar.println(format!("pruned {} node(s)", cnt));
+                if graph.g.node_count() == 0 {
+                    // reset to reclaim memory
+                    graph.g = Default::default();
                 }
             }
         }

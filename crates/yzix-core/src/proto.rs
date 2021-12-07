@@ -41,6 +41,9 @@ pub enum OutputError {
     #[error("mismatch against AssertEqual ({0} != {1})")]
     HashMismatch(StoreHash, StoreHash),
 
+    #[error("input edges '{0:?}' failed")]
+    InputFailed(crate::build_graph::Edge),
+
     #[error("missing input edge '{0}'")]
     InputNotFound(String),
 
