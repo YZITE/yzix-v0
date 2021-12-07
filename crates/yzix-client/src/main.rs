@@ -34,7 +34,6 @@ fn main() {
                 std::fs::File::open(scmd.value_of("GRAPH").unwrap()).expect("unable to open graph"),
             ))
             .expect("unable to parse graph from file");
-        println!("graph = {:?}", graph);
         let schedule_cmd = proto::ControlCommand::Schedule(graph);
         let mut cmd_ser = Vec::new();
         ciborium::ser::into_writer(&schedule_cmd, &mut cmd_ser)
