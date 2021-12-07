@@ -1,0 +1,12 @@
+[package]
+name = "yzix-client"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 WITH LLVM-exception"
+
+[dependencies]
+clap = "2.34"
+serde_json = "1.0"
+
+[dependencies.yzix-core]
+path = "../yzix-core"
