@@ -76,16 +76,28 @@ struct BuiltItem {
     outhash: StoreHash,
 }
 
-async fn handle_logging<T: futures_lite::io::AsyncRead + std::marker::Unpin>(
+async fn handle_logging<
+    T: futures_lite::io::AsyncRead + std::marker::Unpin,
+    U: futures_lite::io::AsyncRead + std::marker::Unpin,
+>(
     tag: u64,
     bldname: String,
     mut log: Vec<Sender<Response>>,
-    pipe: T,
+    pipe1: T,
+    pipe2: U,
 ) {
     use futures_lite::{io::AsyncBufReadExt, stream::StreamExt};
     let mut lbs = bit_set::BitSet::with_capacity(log.len());
-    let mut stream = futures_lite::io::BufReader::new(pipe).lines();
-    while let Some(Ok(content)) = stream.next().await {
+    let mut stream1 = futures_lite::io::BufReader::new(pipe1).lines();
+    let mut stream2 = futures_lite::io::BufReader::new(pipe2).lines();
+    while let Some(content) = futures_lite::future::or(stream1.next(), stream2.next()).await {
+        let content = match content {
+            Ok(x) => x,
+            Err(_) => {
+                // TODO: handle error properly
+                continue;
+            }
+        };
         for (lidx, l) in log.iter().enumerate() {
             if l.send(Response {
                 tag,
@@ -136,14 +148,14 @@ async fn handle_process(
         .stderr(Stdio::piped())
         .current_dir(workdir.path())
         .spawn()?;
-    let a = handle_logging(
+    let x = handle_logging(
         tag,
-        bldname.to_string(),
-        log.clone(),
+        bldname,
+        log,
         ch.stdout.take().unwrap(),
+        ch.stderr.take().unwrap(),
     );
-    let b = handle_logging(tag, bldname, log, ch.stderr.take().unwrap());
-    let exs = zip(zip(a, b), ch.status()).await.1?;
+    let exs = zip(x, ch.status()).await.1?;
     if exs.success() {
         let dump = Dump::read_from_path(&workdir.path().join("out"))?;
         let hash = StoreHash::hash_complex(&dump);
