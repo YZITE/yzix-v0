@@ -443,13 +443,15 @@ fn main() {
                 Arg::with_name("store")
                     .long("store")
                     .value_name("STORE")
-                    .takes_value(true),
+                    .takes_value(true)
+                    .required(true),
             )
             .arg(
                 Arg::with_name("bind")
                     .long("bind")
                     .value_name("ADDR:PORT")
-                    .takes_value(true),
+                    .takes_value(true)
+                    .required(true),
             )
             .arg(Arg::with_name("auto-repair").long("auto-repair"))
             .get_matches()
