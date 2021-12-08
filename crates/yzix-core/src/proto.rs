@@ -5,7 +5,6 @@ use crate::{
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase", tag = "type")]
 pub enum ControlCommand {
     /// schedule a bunch of commands
     Schedule {

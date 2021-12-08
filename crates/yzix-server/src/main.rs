@@ -251,7 +251,28 @@ fn handle_client_io(
                 use proto::ControlCommand as C;
                 let cmd: C = match ciborium::de::from_reader(&buf[..]) {
                     Ok(x) => x,
-                    Err(_) => break,
+                    Err(e) => {
+                        // TODO: report error to client, maybe?
+                        if mainsi
+                            .send(MainMessage::Log(format!("CBOR ERROR: {}", e)))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                        let val: ciborium::value::Value = match ciborium::de::from_reader(&buf[..]) {
+                            Err(_) => break,
+                            Ok(x) => x,
+                        };
+                        if mainsi
+                            .send(MainMessage::Log(format!("CBOR ERROR DEBUG: {:#?}", val)))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                        break;
+                    },
                 };
                 if mainsi
                     .send(match cmd {
