@@ -9,7 +9,7 @@ use yzix_core::proto::{OutputError, Response, ResponseKind};
 use yzix_core::store::{Dump, Hash as StoreHash};
 use yzix_core::Utf8Path;
 
-pub async fn log_to_bunch<T: Clone>(subs: &mut Vec<Sender<T>>, msg: T) {
+pub async fn log_to_bunch<T: Clone>(subs: &mut smallvec::SmallVec<[Sender<T>; 1]>, msg: T) {
     let mut cnt = 0usize;
     let mut bs = bit_set::BitSet::with_capacity(subs.len());
     {
@@ -49,7 +49,7 @@ pub fn push_response(
 async fn handle_logging<T: flio::AsyncRead + Unpin, U: flio::AsyncRead + Unpin>(
     tag: u64,
     bldname: String,
-    mut log: Vec<Sender<LogFwdMessage>>,
+    mut log: smallvec::SmallVec<[Sender<LogFwdMessage>; 1]>,
     pipe1: T,
     pipe2: U,
 ) {
@@ -196,7 +196,7 @@ pub async fn handle_process(
         new_root,
     }: WorkItemRun,
     expect_hash: Option<StoreHash>,
-    log: Vec<Sender<LogFwdMessage>>,
+    log: smallvec::SmallVec<[Sender<LogFwdMessage>; 1]>,
 ) -> Result<BuiltItem, OutputError> {
     let workdir = tempfile::tempdir()?;
     let rootdir = workdir.path().join("rootfs");

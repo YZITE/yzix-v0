@@ -17,6 +17,10 @@ use yzix_core::proto::{self, OutputError, Response, ResponseKind};
 use yzix_core::store::{Dump, Hash as StoreHash};
 use yzix_core::{Utf8Path, Utf8PathBuf};
 
+// allow reasonable accurate measuring of memory usage
+#[global_allocator]
+static GLOBAL: &stats_alloc::StatsAlloc<std::alloc::System> = &stats_alloc::INSTRUMENTED_SYSTEM;
+
 mod clients;
 use clients::{handle_client_io, handle_clients_initial};
 mod utils;
@@ -50,7 +54,7 @@ pub enum LogFwdMessage {
 #[derive(Debug)]
 pub struct NodeMeta {
     output: Output,
-    log: Vec<Sender<LogFwdMessage>>,
+    log: smallvec::SmallVec<[Sender<LogFwdMessage>; 1]>,
 }
 
 impl build_graph::ReadOutHash for NodeMeta {
@@ -401,7 +405,7 @@ fn main() {
             let (logs, logr) = unbounded();
             logwbearer.insert(i.clone(), logs);
             ex.spawn(async move {
-                let mut subs = Vec::new();
+                let mut subs = smallvec::SmallVec::new();
                 while let Ok(x) = logr.recv().await {
                     use LogFwdMessage as LFM;
                     match x {
@@ -458,7 +462,7 @@ fn main() {
                                 pbar.inc_length(1);
                                 NodeMeta {
                                     output: Output::NotStarted,
-                                    log: vec![log.clone()],
+                                    log: smallvec::smallvec![log.clone()],
                                 }
                             },
                             |noder| noder.log.push(log.clone()),
@@ -470,7 +474,7 @@ fn main() {
                                 pbar.inc_length(1);
                                 NodeMeta {
                                     output: Output::NotStarted,
-                                    log: vec![],
+                                    log: smallvec::smallvec![],
                                 }
                             },
                             |_| {},
@@ -592,9 +596,26 @@ fn main() {
                 }
             }
 
-            // garbage collection
+            // garbage collection, only necessary if the graph takes up too much space
+            // we clean up either if the graph contains more than 1000 nodes or uses more
+            // than 1 MiB memory.
             if graph.0.node_count() == 0 {
                 continue;
+            } else if graph.0.node_count() < 1000 {
+                // check memory usage
+                let stats = GLOBAL.stats();
+                let mut mw = stats.bytes_allocated - stats.bytes_deallocated;
+                let realloc_abs: usize = stats.bytes_reallocated.abs().try_into().unwrap();
+                if stats.bytes_reallocated > 0 {
+                    mw += realloc_abs;
+                } else {
+                    mw -= realloc_abs;
+                }
+                // DEBUG
+                pbar.println(format!("memusage: ~ {} KiB", mw / 1024));
+                if mw < 0x100000 {
+                    continue;
+                }
             }
 
             // propagate failures
