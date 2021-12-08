@@ -1,0 +1,4 @@
+store_path = "/tmp/yzix-store"
+socket_bind = "127.0.0.1:3669"
+bearer_tokens = ["leet"]
+auto_repair = true
