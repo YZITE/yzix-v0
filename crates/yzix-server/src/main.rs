@@ -6,18 +6,21 @@
     unused_must_use
 )]
 
-use async_channel::{unbounded, Receiver, Sender};
+use async_channel::{unbounded, Sender};
 use async_lock::Semaphore;
-use async_process::Command;
-use futures_lite::{future::zip, io as flio, AsyncReadExt, AsyncWriteExt};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
-use std::{future::Future, marker::Unpin, sync::Arc};
+use std::sync::Arc;
 use yz_server_executor::Executor;
 use yzix_core::build_graph::{self, Direction, EdgeRef, NodeIndex};
 use yzix_core::proto::{self, OutputError, Response, ResponseKind};
 use yzix_core::store::{Dump, Hash as StoreHash};
-use yzix_core::{ciborium, Utf8Path, Utf8PathBuf};
+use yzix_core::{Utf8Path, Utf8PathBuf};
+
+mod clients;
+use clients::{handle_client_io, handle_clients_initial};
+mod utils;
+use utils::*;
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 struct ServerConfig {
@@ -36,13 +39,13 @@ enum Output {
 }
 
 #[derive(Clone, Debug)]
-enum LogFwdMessage {
+pub enum LogFwdMessage {
     Response(Arc<Response>),
     Subscribe(Sender<Arc<Response>>),
 }
 
 #[derive(Debug)]
-struct NodeMeta {
+pub struct NodeMeta {
     output: Output,
     log: Vec<Sender<LogFwdMessage>>,
 }
@@ -57,7 +60,7 @@ impl build_graph::ReadOutHash for NodeMeta {
     }
 }
 
-enum MainMessage {
+pub enum MainMessage {
     ClientConn {
         conn: async_net::TcpStream,
         opts: proto::ClientOpts,
@@ -79,7 +82,7 @@ struct WorkItem {
     kind: WorkItemKind,
 }
 
-struct WorkItemRun {
+pub struct WorkItemRun {
     cmd: String,
     args: Vec<String>,
     envs: HashMap<String, String>,
@@ -91,305 +94,10 @@ enum WorkItemKind {
     Dump(HashMap<String, StoreHash>),
 }
 
-struct BuiltItem {
+pub struct BuiltItem {
     inhash: Option<StoreHash>,
     dump: Option<Dump>,
     outhash: StoreHash,
-}
-
-async fn log_to_bunch<T: Clone>(subs: &mut Vec<Sender<T>>, msg: T) {
-    let mut cnt = 0usize;
-    let mut bs = bit_set::BitSet::with_capacity(subs.len());
-    {
-        use futures_lite::stream::StreamExt;
-        let mut cont: futures_util::stream::FuturesOrdered<_> =
-            subs.iter().map(|li| li.send(msg.clone())).collect();
-        while let Some(suc) = cont.next().await {
-            if suc.is_ok() {
-                bs.insert(cnt);
-            }
-            cnt += 1;
-        }
-    }
-    cnt = 0;
-    subs.retain(|_| {
-        let prev_cnt = cnt;
-        cnt += 1;
-        bs.contains(prev_cnt)
-    });
-}
-
-fn push_response(
-    g_: &mut build_graph::Graph<NodeMeta>,
-    nid: NodeIndex,
-    kind: ResponseKind,
-) -> impl Future<Output = ()> + '_ {
-    let n = &mut g_.0[nid];
-    log_to_bunch(
-        &mut n.rest.log,
-        LogFwdMessage::Response(Arc::new(Response {
-            tag: n.logtag,
-            kind,
-        })),
-    )
-}
-
-async fn handle_logging<T: flio::AsyncRead + Unpin, U: flio::AsyncRead + Unpin>(
-    tag: u64,
-    bldname: String,
-    mut log: Vec<Sender<LogFwdMessage>>,
-    pipe1: T,
-    pipe2: U,
-) {
-    use futures_lite::{io::AsyncBufReadExt, stream::StreamExt};
-    let mut stream1 = flio::BufReader::new(pipe1).lines();
-    let mut stream2 = flio::BufReader::new(pipe2).lines();
-    while let Some(content) = futures_lite::future::or(stream1.next(), stream2.next()).await {
-        let content = match content {
-            Ok(x) => x,
-            // TODO: give the client a proper error serialization
-            Err(e) => format!("I/O error: {}", e),
-        };
-        log_to_bunch(
-            &mut log,
-            LogFwdMessage::Response(Arc::new(Response {
-                tag,
-                kind: ResponseKind::LogLine {
-                    bldname: bldname.to_string(),
-                    content: content.clone(),
-                },
-            })),
-        )
-        .await;
-        if log.is_empty() {
-            break;
-        }
-    }
-}
-
-async fn handle_process(
-    tag: u64,
-    inhash: Option<StoreHash>,
-    bldname: String,
-    WorkItemRun { cmd, args, envs }: WorkItemRun,
-    expect_hash: Option<StoreHash>,
-    log: Vec<Sender<LogFwdMessage>>,
-) -> Result<BuiltItem, OutputError> {
-    let workdir = tempfile::tempdir()?;
-
-    // FIXME: wrap that into a crun invocation
-    use async_process::Stdio;
-    let mut ch = Command::new(cmd)
-        // TODO: insert .env_clear()
-        .args(args)
-        .envs(envs)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .current_dir(workdir.path())
-        .spawn()?;
-    let x = handle_logging(
-        tag,
-        bldname,
-        log,
-        ch.stdout.take().unwrap(),
-        ch.stderr.take().unwrap(),
-    );
-    let exs = zip(x, ch.status()).await.1?;
-    if exs.success() {
-        let dump = Dump::read_from_path(&workdir.path().join("out"))?;
-        let hash = StoreHash::hash_complex(&dump);
-        if let Some(expect_hash) = expect_hash {
-            if hash != expect_hash {
-                return Err(OutputError::HashMismatch(expect_hash, hash));
-            }
-        }
-        Ok(BuiltItem {
-            inhash,
-            dump: Some(dump),
-            outhash: hash,
-        })
-    } else if let Some(x) = exs.code() {
-        Err(OutputError::Exit(x))
-    } else {
-        #[cfg(unix)]
-        if let Some(x) = std::os::unix::process::ExitStatusExt::signal(&exs) {
-            return Err(OutputError::Killed(x));
-        }
-
-        Err(OutputError::Unknown(exs.to_string()))
-    }
-}
-
-fn handle_client_io(
-    mains: &Sender<MainMessage>,
-    stream: async_net::TcpStream,
-    attach_logs: Option<(Arc<str>, Receiver<Arc<Response>>)>,
-) -> impl Future<Output = ((), ())> {
-    let mainsi = mains.clone();
-    let mainso = mains.clone();
-    let mut stream2 = stream.clone();
-    let (attach_logs_bearer_token, logr) = match attach_logs {
-        Some((x, y)) => (Some(x), Some(y)),
-        None => (None, None),
-    };
-
-    // handle input
-    zip(
-        async move {
-            let mut lenbuf = [0u8; 4];
-            let mut buf: Vec<u8> = Vec::new();
-            let mut stream = flio::BufReader::new(stream);
-            while stream.read_exact(&mut lenbuf).await.is_ok() {
-                buf.clear();
-                let len = u32::from_le_bytes(lenbuf);
-                // TODO: make sure that the length isn't too big
-                buf.resize(len.try_into().unwrap(), 0);
-                if stream.read_exact(&mut buf[..]).await.is_err() {
-                    break;
-                }
-                use proto::ControlCommand as C;
-                let cmd: C = match ciborium::de::from_reader(&buf[..]) {
-                    Ok(x) => x,
-                    Err(e) => {
-                        // TODO: report error to client, maybe?
-                        if mainsi
-                            .send(MainMessage::Log(format!("CBOR ERROR: {}", e)))
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                        let val: ciborium::value::Value = match ciborium::de::from_reader(&buf[..]) {
-                            Err(_) => break,
-                            Ok(x) => x,
-                        };
-                        if mainsi
-                            .send(MainMessage::Log(format!("CBOR ERROR DEBUG: {:#?}", val)))
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                        break;
-                    },
-                };
-                if mainsi
-                    .send(match cmd {
-                        C::Schedule {
-                            graph,
-                            attach_to_logs,
-                        } => MainMessage::Schedule {
-                            graph,
-                            attach_logs_bearer_token: if attach_to_logs {
-                                attach_logs_bearer_token.clone()
-                            } else {
-                                None
-                            },
-                        },
-                    })
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        },
-        // handle output
-        async move {
-            if let Some(logr) = logr {
-                let mut buf: Vec<u8> = Vec::new();
-                while let Ok(x) = logr.recv().await {
-                    buf.clear();
-                    if let Err(e) = ciborium::ser::into_writer(&*x, &mut buf) {
-                        // TODO: handle error
-                        if mainso
-                            .send(MainMessage::Log(format!("CBOR ERROR: {}", e)))
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                    } else {
-                        if stream2
-                            .write_all(&u32::to_le_bytes(buf.len().try_into().unwrap()))
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                        if stream2.write_all(&buf[..]).await.is_err() {
-                            break;
-                        }
-                        if stream2.flush().await.is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-        },
-    )
-}
-
-async fn handle_clients_initial(
-    mains: Sender<MainMessage>,
-    listener: async_net::TcpListener,
-    valid_bearer_tokens: HashSet<String>,
-) {
-    while let Ok((mut stream, _)) = listener.accept().await {
-        // auth + options
-        let mut lenbuf = [0u8; 4];
-        if stream.read_exact(&mut lenbuf).await.is_err() {
-            continue;
-        }
-        let len = u32::from_le_bytes(lenbuf);
-        if len >= 0x400 {
-            continue;
-        }
-        let mut buf: Vec<u8> = Vec::new();
-        buf.resize(len.try_into().unwrap(), 0);
-        if stream.read_exact(&mut buf[..]).await.is_err() {
-            continue;
-        }
-        let opts: proto::ClientOpts = match ciborium::de::from_reader(&buf[..]) {
-            Ok(x) => x,
-            Err(_) => continue,
-        };
-        if !valid_bearer_tokens.contains(&opts.bearer_auth) {
-            continue;
-        }
-        if mains
-            .send(MainMessage::ClientConn { conn: stream, opts })
-            .await
-            .is_err()
-        {
-            break;
-        }
-    }
-}
-
-fn eval_pat(
-    store_path: &Utf8Path,
-    rphs: &HashMap<String, StoreHash>,
-    xs: &[build_graph::CmdArgSnip],
-) -> Result<String, String> {
-    // NOTE: do not use an iterator chain here,
-    // as looping lets us handle string and returning more efficiently
-    let mut ret = String::new();
-    for x in xs {
-        use build_graph::CmdArgSnip as CArgS;
-        match x {
-            CArgS::String(s) => ret += s,
-            CArgS::Placeholder(iname) => {
-                if let Some(y) = rphs.get(iname) {
-                    ret += store_path.join(y.to_string()).as_str();
-                } else {
-                    return Err(iname.to_string());
-                }
-            }
-        }
-    }
-    Ok(ret)
 }
 
 fn try_make_work_intern(
