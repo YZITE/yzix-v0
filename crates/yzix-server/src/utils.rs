@@ -292,3 +292,17 @@ pub fn eval_pat(
     }
     Ok(ret)
 }
+
+pub fn memory_usage() -> usize {
+    // check memory usage
+    let stats = super::GLOBAL.stats();
+    let mut mw = stats.bytes_allocated - stats.bytes_deallocated;
+    let realloc_abs: usize = stats.bytes_reallocated.abs().try_into().unwrap();
+    if stats.bytes_reallocated > 0 {
+        mw += realloc_abs;
+    } else {
+        mw -= realloc_abs;
+    }
+    eprintln!("\n{:#?} -> {}\n", stats, mw);
+    mw
+}

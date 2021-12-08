@@ -431,6 +431,7 @@ fn main() {
 
         use MainMessage as MM;
         while let Ok(x) = mainr.recv().await {
+            pbar.println(format!("[_] memusage: ~ {} KiB", memory_usage() / 1024));
             match x {
                 MM::Shutdown => break,
                 MM::Log(logline) => pbar.println(logline),
@@ -602,15 +603,7 @@ fn main() {
             if graph.0.node_count() == 0 {
                 continue;
             } else if graph.0.node_count() < 1000 {
-                // check memory usage
-                let stats = GLOBAL.stats();
-                let mut mw = stats.bytes_allocated - stats.bytes_deallocated;
-                let realloc_abs: usize = stats.bytes_reallocated.abs().try_into().unwrap();
-                if stats.bytes_reallocated > 0 {
-                    mw += realloc_abs;
-                } else {
-                    mw -= realloc_abs;
-                }
+                let mw = memory_usage();
                 // DEBUG
                 pbar.println(format!("memusage: ~ {} KiB", mw / 1024));
                 if mw < 0x100000 {
@@ -667,7 +660,9 @@ fn main() {
                 pbar.println(format!("pruned {} node(s)", cnt));
                 if graph.0.node_count() == 0 {
                     // reset to reclaim memory
+                    pbar.println(format!("reset to reclaim memory"));
                     graph.0 = Default::default();
+                    pbar.println(format!("memusage: ~ {} KiB", memory_usage() / 1024));
                 }
             }
         }
