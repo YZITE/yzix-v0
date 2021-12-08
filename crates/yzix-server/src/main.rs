@@ -93,14 +93,14 @@ pub struct WorkItemRun {
 
 enum WorkItemKind {
     Run(WorkItemRun),
-    UnDump(Dump),
+    UnDump(Arc<Dump>),
     Require(StoreHash),
     Dump(HashMap<String, StoreHash>),
 }
 
 pub struct BuiltItem {
     inhash: Option<StoreHash>,
-    dump: Option<Dump>,
+    dump: Option<Arc<Dump>>,
     outhash: StoreHash,
 }
 
@@ -320,6 +320,7 @@ async fn schedule(
                         }
                     }
                     if success {
+                        let dump = Arc::new(dump);
                         push_response(graph, nid, ResponseKind::Dump(dump.clone())).await;
                         Ok(BuiltItem {
                             inhash,
@@ -453,22 +454,18 @@ fn main() {
                         let log = &logwbearer[&*bearer];
                         graph.take_and_merge(
                             graph2,
-                            |()| {
-                                NodeMeta {
-                                    output: Output::NotStarted,
-                                    log: smallvec::smallvec![log.clone()],
-                                }
+                            |()| NodeMeta {
+                                output: Output::NotStarted,
+                                log: smallvec::smallvec![log.clone()],
                             },
                             |noder| noder.log.push(log.clone()),
                         )
                     } else {
                         graph.take_and_merge(
                             graph2,
-                            |()| {
-                                NodeMeta {
-                                    output: Output::NotStarted,
-                                    log: smallvec::smallvec![],
-                                }
+                            |()| NodeMeta {
+                                output: Output::NotStarted,
+                                log: smallvec::smallvec![],
                             },
                             |_| {},
                         )
@@ -501,7 +498,7 @@ fn main() {
                                                         "WARNING: detected data corruption @ {}",
                                                         outhash
                                                     );
-                                                } else if on_disk_dump != dump {
+                                                } else if on_disk_dump != *dump {
                                                     println!(
                                                         "ERROR: detected hash collision @ {}",
                                                         outhash
@@ -536,10 +533,10 @@ fn main() {
                                             .store_path
                                             .join(format!("{}.{}", inhash, INPUT_REALISATION_EXT));
                                         let target = format!("{}", outhash).into();
-                                        let to_dir = match dump {
+                                        let to_dir = match &*dump {
                                             Dump::Directory(_) => true,
                                             Dump::Regular { .. } => false,
-                                            Dump::SymLink { to_dir, .. } => to_dir,
+                                            Dump::SymLink { to_dir, .. } => *to_dir,
                                         };
                                         if let Err(e) = (Dump::SymLink { target, to_dir })
                                             .write_to_path(inpath.as_std_path(), true)

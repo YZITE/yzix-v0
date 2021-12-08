@@ -254,7 +254,7 @@ pub async fn handle_process(
         }
         Ok(BuiltItem {
             inhash,
-            dump: Some(dump),
+            dump: Some(std::sync::Arc::new(dump)),
             outhash: hash,
         })
     } else if let Some(x) = exs.code() {

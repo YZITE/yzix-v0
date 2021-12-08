@@ -42,7 +42,7 @@ pub struct Response {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum ResponseKind {
     LogLine { bldname: String, content: String },
-    Dump(Dump),
+    Dump(std::sync::Arc<Dump>),
     OutputNotify(Result<StoreHash, OutputError>),
 }
 

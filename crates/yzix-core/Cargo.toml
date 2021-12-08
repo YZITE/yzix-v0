@@ -26,7 +26,7 @@ features = ["serde-1", "stable_graph"]
 [dependencies.serde]
 version = "1.0"
 default-features = false
-features = ["derive", "std"]
+features = ["derive", "rc", "std"]
 
 [target.'cfg(unix)'.dependencies]
 nix = "0.23"

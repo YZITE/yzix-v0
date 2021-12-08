@@ -2,7 +2,7 @@ use crate::store::Hash as StoreHash;
 pub use petgraph::stable_graph::{NodeIndex, StableGraph as RawGraph};
 pub use petgraph::{visit::EdgeRef, Direction};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub enum CmdArgSnip {
@@ -41,7 +41,7 @@ pub enum NodeKind {
     /// and use it as a source;
     /// additionally, it also might allow us to later extend this
     /// to suppot some distcc-like workflow
-    UnDump { dat: crate::store::Dump },
+    UnDump { dat: Arc<crate::store::Dump> },
 
     /// to avoid the need to always upload huge amount of data,
     /// use this to require a store path to be already present.

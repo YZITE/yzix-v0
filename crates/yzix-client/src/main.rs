@@ -165,8 +165,10 @@ fn main() {
             graph.0.add_node(bg::Node {
                 name: p.file_name().unwrap().to_str().unwrap().to_string(),
                 kind: bg::NodeKind::UnDump {
-                    dat: yzix_core::store::Dump::read_from_path(p)
-                        .unwrap_or_else(|e| panic!("{}: unable to read source: {}", i, e)),
+                    dat: std::sync::Arc::new(
+                        yzix_core::store::Dump::read_from_path(p)
+                            .unwrap_or_else(|e| panic!("{}: unable to read source: {}", i, e)),
+                    ),
                 },
                 logtag: (startval + tag).try_into().unwrap(),
                 rest: (),
