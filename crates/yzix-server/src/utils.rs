@@ -214,6 +214,13 @@ pub async fn handle_process(
         std::fs::create_dir_all(&rootdir)?;
     }
 
+    #[cfg(unix)]
+    nix::unistd::chown(
+        &rootdir,
+        Some(nix::unistd::Uid::from_raw(config.worker_uid)),
+        Some(nix::unistd::Gid::from_raw(config.worker_gid)),
+    )?;
+
     // generate spec
     write_linux_ocirt_spec(
         config,

@@ -26,3 +26,6 @@ yz-server-executor = "0.2"
 
 [dependencies.yzix-core]
 path = "../yzix-core"
+
+[target.'cfg(unix)'.dependencies]
+nix = "0.23"

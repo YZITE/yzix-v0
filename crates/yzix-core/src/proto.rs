@@ -92,3 +92,10 @@ impl From<std::io::Error> for OutputError {
         }
     }
 }
+
+#[cfg(unix)]
+impl From<nix::errno::Errno> for OutputError {
+    fn from(e: nix::errno::Errno) -> OutputError {
+        OutputError::Io(e as i32)
+    }
+}
