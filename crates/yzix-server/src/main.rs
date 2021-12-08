@@ -591,7 +591,7 @@ fn main() {
     std::env::set_var("TZ", "UTC");
 
     let config: ServerConfig = {
-        let mut args = std::env::args();
+        let mut args = std::env::args().skip(1);
         let arg = if let Some(x) = args.next() {
             x
         } else {

@@ -44,8 +44,7 @@ fn main() {
                     .long("server")
                     .help("yzix server address:port")
                     .takes_value(true)
-                    .required(true)
-                    .global(true),
+                    .required(true),
             )
             .subcommand(
                 SubCommand::with_name("build")
