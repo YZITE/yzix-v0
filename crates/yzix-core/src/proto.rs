@@ -4,14 +4,32 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
-/// NOTE: closing a connection will cause you to permanently lose access
-/// to log output of your currently submitted build graphs
-/// (e.g. you can't reattach to a running build)
-/// TODO: find a way to allow safe and secure reattachment
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase", tag = "type")]
 pub enum ControlCommand {
     /// schedule a bunch of commands
-    Schedule(Graph<()>),
+    Schedule {
+        graph: Graph<()>,
+
+        /// if set to false, no logs will be sent or kept
+        /// about your submitted build graph
+        attach_to_logs: bool,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ClientOpts {
+    pub bearer_auth: String,
+
+    /// if set to true, all logs for this bearer
+    /// token will be sent to this client.
+    ///
+    /// if set to false, no logs will be sent
+    /// to this client.
+    ///
+    /// if you really need separate log streams,
+    /// use multiple different bearer tokens.
+    pub attach_to_logs: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

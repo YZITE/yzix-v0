@@ -1,21 +1,31 @@
 #![forbid(
-    unsafe_code,
     clippy::cast_ptr_alignment,
     trivial_casts,
-    unconditional_recursion
+    unconditional_recursion,
+    unsafe_code,
+    unused_must_use
 )]
 
-use async_channel::{unbounded, Sender};
+use async_channel::{unbounded, Receiver, Sender};
 use async_lock::Semaphore;
-use async_net::TcpListener;
 use async_process::Command;
-use std::collections::HashMap;
-use std::sync::Arc;
+use futures_lite::{future::zip, io as flio, AsyncReadExt, AsyncWriteExt};
+use serde::Deserialize;
+use std::collections::{HashMap, HashSet};
+use std::{future::Future, marker::Unpin, sync::Arc};
 use yz_server_executor::Executor;
 use yzix_core::build_graph::{self, Direction, EdgeRef, NodeIndex};
 use yzix_core::proto::{self, OutputError, Response, ResponseKind};
 use yzix_core::store::{Dump, Hash as StoreHash};
 use yzix_core::{ciborium, Utf8Path, Utf8PathBuf};
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+struct ServerConfig {
+    store_path: Utf8PathBuf,
+    socket_bind: String,
+    bearer_tokens: HashSet<String>,
+    auto_repair: bool,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Output {
@@ -25,10 +35,16 @@ enum Output {
     Success(StoreHash),
 }
 
+#[derive(Clone, Debug)]
+enum LogFwdMessage {
+    Response(Arc<Response>),
+    Subscribe(Sender<Arc<Response>>),
+}
+
 #[derive(Debug)]
 struct NodeMeta {
     output: Output,
-    log: Vec<Sender<Response>>,
+    log: Vec<Sender<LogFwdMessage>>,
 }
 
 impl build_graph::ReadOutHash for NodeMeta {
@@ -42,10 +58,15 @@ impl build_graph::ReadOutHash for NodeMeta {
 }
 
 enum MainMessage {
+    ClientConn {
+        conn: async_net::TcpStream,
+        opts: proto::ClientOpts,
+    },
     Schedule {
         graph: build_graph::Graph<()>,
-        log: Sender<Response>,
+        attach_logs_bearer_token: Option<Arc<str>>,
     },
+    Log(String),
     Shutdown,
     Done {
         nid: NodeIndex,
@@ -76,50 +97,70 @@ struct BuiltItem {
     outhash: StoreHash,
 }
 
-async fn handle_logging<
-    T: futures_lite::io::AsyncRead + std::marker::Unpin,
-    U: futures_lite::io::AsyncRead + std::marker::Unpin,
->(
+async fn log_to_bunch<T: Clone>(subs: &mut Vec<Sender<T>>, msg: T) {
+    let mut cnt = 0usize;
+    let mut bs = bit_set::BitSet::with_capacity(subs.len());
+    {
+        use futures_lite::stream::StreamExt;
+        let mut cont: futures_util::stream::FuturesOrdered<_> =
+            subs.iter().map(|li| li.send(msg.clone())).collect();
+        while let Some(suc) = cont.next().await {
+            if suc.is_ok() {
+                bs.insert(cnt);
+            }
+            cnt += 1;
+        }
+    }
+    cnt = 0;
+    subs.retain(|_| {
+        let prev_cnt = cnt;
+        cnt += 1;
+        bs.contains(prev_cnt)
+    });
+}
+
+fn push_response(
+    g_: &mut build_graph::Graph<NodeMeta>,
+    nid: NodeIndex,
+    kind: ResponseKind,
+) -> impl Future<Output = ()> + '_ {
+    let n = &mut g_.0[nid];
+    log_to_bunch(
+        &mut n.rest.log,
+        LogFwdMessage::Response(Arc::new(Response {
+            tag: n.logtag,
+            kind,
+        })),
+    )
+}
+
+async fn handle_logging<T: flio::AsyncRead + Unpin, U: flio::AsyncRead + Unpin>(
     tag: u64,
     bldname: String,
-    mut log: Vec<Sender<Response>>,
+    mut log: Vec<Sender<LogFwdMessage>>,
     pipe1: T,
     pipe2: U,
 ) {
     use futures_lite::{io::AsyncBufReadExt, stream::StreamExt};
-    let mut lbs = bit_set::BitSet::with_capacity(log.len());
-    let mut stream1 = futures_lite::io::BufReader::new(pipe1).lines();
-    let mut stream2 = futures_lite::io::BufReader::new(pipe2).lines();
+    let mut stream1 = flio::BufReader::new(pipe1).lines();
+    let mut stream2 = flio::BufReader::new(pipe2).lines();
     while let Some(content) = futures_lite::future::or(stream1.next(), stream2.next()).await {
         let content = match content {
             Ok(x) => x,
-            Err(_) => {
-                // TODO: handle error properly
-                continue;
-            }
+            // TODO: give the client a proper error serialization
+            Err(e) => format!("I/O error: {}", e),
         };
-        for (lidx, l) in log.iter().enumerate() {
-            if l.send(Response {
+        log_to_bunch(
+            &mut log,
+            LogFwdMessage::Response(Arc::new(Response {
                 tag,
                 kind: ResponseKind::LogLine {
                     bldname: bldname.to_string(),
                     content: content.clone(),
                 },
-            })
-            .await
-            .is_err()
-            {
-                lbs.insert(lidx);
-            }
-        }
-        let _ = content;
-        let mut cnt = 0;
-        log.retain(|_| {
-            let mark = lbs.contains(cnt);
-            cnt += 1;
-            !mark
-        });
-        lbs.clear();
+            })),
+        )
+        .await;
         if log.is_empty() {
             break;
         }
@@ -132,13 +173,12 @@ async fn handle_process(
     bldname: String,
     WorkItemRun { cmd, args, envs }: WorkItemRun,
     expect_hash: Option<StoreHash>,
-    log: Vec<Sender<Response>>,
+    log: Vec<Sender<LogFwdMessage>>,
 ) -> Result<BuiltItem, OutputError> {
     let workdir = tempfile::tempdir()?;
 
     // FIXME: wrap that into a crun invocation
     use async_process::Stdio;
-    use futures_lite::future::zip;
     let mut ch = Command::new(cmd)
         // TODO: insert .env_clear()
         .args(args)
@@ -181,16 +221,130 @@ async fn handle_process(
     }
 }
 
-async fn push_response(g_: &build_graph::Graph<NodeMeta>, nid: NodeIndex, kind: ResponseKind) {
-    use futures_lite::stream::StreamExt;
-    let n = &g_.0[nid];
-    let resp = Response {
-        tag: n.logtag,
-        kind: kind.clone(),
+fn handle_client_io(
+    mains: &Sender<MainMessage>,
+    stream: async_net::TcpStream,
+    attach_logs: Option<(Arc<str>, Receiver<Arc<Response>>)>,
+) -> impl Future<Output = ((), ())> {
+    let mainsi = mains.clone();
+    let mainso = mains.clone();
+    let mut stream2 = stream.clone();
+    let (attach_logs_bearer_token, logr) = match attach_logs {
+        Some((x, y)) => (Some(x), Some(y)),
+        None => (None, None),
     };
-    let mut cont: futures_util::stream::FuturesUnordered<_> =
-        n.rest.log.iter().map(|li| li.send(resp.clone())).collect();
-    while cont.next().await.is_some() {}
+
+    // handle input
+    zip(
+        async move {
+            let mut lenbuf = [0u8; 4];
+            let mut buf: Vec<u8> = Vec::new();
+            let mut stream = flio::BufReader::new(stream);
+            while stream.read_exact(&mut lenbuf).await.is_ok() {
+                buf.clear();
+                let len = u32::from_le_bytes(lenbuf);
+                // TODO: make sure that the length isn't too big
+                buf.resize(len.try_into().unwrap(), 0);
+                if stream.read_exact(&mut buf[..]).await.is_err() {
+                    break;
+                }
+                use proto::ControlCommand as C;
+                let cmd: C = match ciborium::de::from_reader(&buf[..]) {
+                    Ok(x) => x,
+                    Err(_) => break,
+                };
+                if mainsi
+                    .send(match cmd {
+                        C::Schedule {
+                            graph,
+                            attach_to_logs,
+                        } => MainMessage::Schedule {
+                            graph,
+                            attach_logs_bearer_token: if attach_to_logs {
+                                attach_logs_bearer_token.clone()
+                            } else {
+                                None
+                            },
+                        },
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        },
+        // handle output
+        async move {
+            if let Some(logr) = logr {
+                let mut buf: Vec<u8> = Vec::new();
+                while let Ok(x) = logr.recv().await {
+                    buf.clear();
+                    if let Err(e) = ciborium::ser::into_writer(&*x, &mut buf) {
+                        // TODO: handle error
+                        if mainso
+                            .send(MainMessage::Log(format!("CBOR ERROR: {}", e)))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    } else {
+                        if stream2
+                            .write_all(&u32::to_le_bytes(buf.len().try_into().unwrap()))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                        if stream2.write_all(&buf[..]).await.is_err() {
+                            break;
+                        }
+                        if stream2.flush().await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        },
+    )
+}
+
+async fn handle_clients_initial(
+    mains: Sender<MainMessage>,
+    listener: async_net::TcpListener,
+    valid_bearer_tokens: HashSet<String>,
+) {
+    while let Ok((mut stream, _)) = listener.accept().await {
+        // auth + options
+        let mut lenbuf = [0u8; 4];
+        if stream.read_exact(&mut lenbuf).await.is_err() {
+            continue;
+        }
+        let len = u32::from_le_bytes(lenbuf);
+        if len >= 0x400 {
+            continue;
+        }
+        let mut buf: Vec<u8> = Vec::new();
+        buf.resize(len.try_into().unwrap(), 0);
+        if stream.read_exact(&mut buf[..]).await.is_err() {
+            continue;
+        }
+        let opts: proto::ClientOpts = match ciborium::de::from_reader(&buf[..]) {
+            Ok(x) => x,
+            Err(_) => continue,
+        };
+        if !valid_bearer_tokens.contains(&opts.bearer_auth) {
+            continue;
+        }
+        if mains
+            .send(MainMessage::ClientConn { conn: stream, opts })
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
 }
 
 fn eval_pat(
@@ -436,31 +590,28 @@ fn main() {
     // set the time zone to avoid funky locale stuff
     std::env::set_var("TZ", "UTC");
 
-    let matches = {
-        use clap::{App, Arg};
-        App::new("yzix-server")
-            .arg(
-                Arg::with_name("store")
-                    .long("store")
-                    .value_name("STORE")
-                    .takes_value(true)
-                    .required(true),
-            )
-            .arg(
-                Arg::with_name("bind")
-                    .long("bind")
-                    .value_name("ADDR:PORT")
-                    .takes_value(true)
-                    .required(true),
-            )
-            .arg(Arg::with_name("auto-repair").long("auto-repair"))
-            .get_matches()
+    let config: ServerConfig = {
+        let mut args = std::env::args();
+        let arg = if let Some(x) = args.next() {
+            x
+        } else {
+            eprintln!(
+                "yzix-server: ERROR: invalid invocation (supply a config file as only argument)"
+            );
+            std::process::exit(1);
+        };
+        if args.next().is_some() || arg == "--help" {
+            eprintln!(
+                "yzix-server: ERROR: invalid invocation (supply a config file as only argument)"
+            );
+            std::process::exit(1);
+        }
+
+        toml::de::from_slice(&std::fs::read(arg).expect("unable to read supplied config file"))
+            .expect("unable to parse supplied config file")
     };
 
-    let store_path = Utf8PathBuf::from(matches.value_of("store").unwrap());
-    let auto_repair = matches.is_present("auto-repair");
-
-    std::fs::create_dir_all(&store_path).expect("unable to create store dir");
+    std::fs::create_dir_all(&config.store_path).expect("unable to create store dir");
 
     let cpucnt = num_cpus::get();
     let pbar = indicatif::ProgressBar::new(0);
@@ -468,7 +619,7 @@ fn main() {
     let jobsem = Arc::new(Semaphore::new(cpucnt));
 
     ex.block_on(move |ex| async move {
-        let listener = TcpListener::bind(matches.value_of("bind").unwrap())
+        let listener = async_net::TcpListener::bind(&config.socket_bind)
             .await
             .unwrap();
 
@@ -489,97 +640,89 @@ fn main() {
         })
         .detach();
 
-        let mains2 = mains.clone();
-        let pbar2 = pbar.clone();
-        ex.spawn(async move {
-            while let Ok((stream, _)) = listener.accept().await {
-                use futures_lite::{future::zip, AsyncReadExt, AsyncWriteExt};
-                // TODO: auth
-                let mut stream2 = stream.clone();
-                let (logs, logr) = unbounded();
-                let mains3 = mains2.clone();
-                let pbar3 = pbar2.clone();
-                // handle input
-                zip(
-                    async move {
-                        let mut stream = futures_lite::io::BufReader::new(stream);
-                        let mut lenbuf = [0u8; 4];
-                        while stream.read_exact(&mut lenbuf).await.is_ok() {
-                            let len = u32::from_le_bytes(lenbuf);
-                            // TODO: make sure that the length isn't too big
-                            let mut buf: Vec<u8> = Vec::new();
-                            buf.resize(len.try_into().unwrap(), 0);
-                            if stream.read_exact(&mut buf[..]).await.is_err() {
-                                break;
-                            }
-                            use proto::ControlCommand as C;
-                            let cmd: C = match ciborium::de::from_reader(&buf[..]) {
-                                Ok(x) => x,
-                                Err(_) => break,
-                            };
-                            if mains3
-                                .send(match cmd {
-                                    C::Schedule(graph) => MainMessage::Schedule {
-                                        graph,
-                                        log: logs.clone(),
-                                    },
-                                })
-                                .await
-                                .is_err()
-                            {
-                                break;
-                            }
+        // handle log forwarding
+        let mut logwbearer = HashMap::<String, Sender<LogFwdMessage>>::new();
+        for i in &config.bearer_tokens {
+            let (logs, logr) = unbounded();
+            logwbearer.insert(i.clone(), logs);
+            ex.spawn(async move {
+                let mut subs = Vec::new();
+                while let Ok(x) = logr.recv().await {
+                    use LogFwdMessage as LFM;
+                    match x {
+                        LFM::Response(r) => {
+                            log_to_bunch(&mut subs, r).await;
                         }
-                    },
-                    // handle output
-                    async move {
-                        let mut buf: Vec<u8> = Vec::new();
-                        while let Ok(x) = logr.recv().await {
-                            buf.clear();
-                            if let Err(e) = ciborium::ser::into_writer(&x, &mut buf) {
-                                pbar3.println(format!("ERROR: {}", e));
-                                // TODO: handle error
-                            } else {
-                                if stream2
-                                    .write_all(&u32::to_le_bytes(buf.len().try_into().unwrap()))
-                                    .await
-                                    .is_err()
-                                {
-                                    break;
-                                }
-                                if stream2.write_all(&buf[..]).await.is_err() {
-                                    break;
-                                }
-                                if stream2.flush().await.is_err() {
-                                    break;
-                                }
-                            }
+                        LFM::Subscribe(s) => {
+                            subs.push(s);
                         }
-                    },
-                )
-                .await;
-            }
-        })
+                    }
+                }
+            })
+            .detach();
+        }
+        let logwbearer = logwbearer;
+
+        ex.spawn(handle_clients_initial(
+            mains.clone(),
+            listener,
+            config.bearer_tokens.clone(),
+        ))
         .detach();
 
         use MainMessage as MM;
         while let Ok(x) = mainr.recv().await {
             match x {
                 MM::Shutdown => break,
-                MM::Schedule { graph: graph2, log } => {
-                    let trt = graph.take_and_merge(
-                        graph2,
-                        |()| {
-                            pbar.inc_length(1);
-                            NodeMeta {
-                                output: Output::NotStarted,
-                                log: vec![log.clone()],
-                            }
+                MM::Log(logline) => pbar.println(logline),
+                MM::ClientConn { conn, opts } => {
+                    ex.spawn(handle_client_io(
+                        &mains,
+                        conn,
+                        if opts.attach_to_logs {
+                            let (logs, logr) = unbounded();
+                            let _ = logwbearer[&opts.bearer_auth]
+                                .send(LogFwdMessage::Subscribe(logs))
+                                .await;
+                            Some((opts.bearer_auth.into(), logr))
+                        } else {
+                            None
                         },
-                        |noder| noder.log.push(log.clone()),
-                    );
+                    ))
+                    .detach();
+                }
+                MM::Schedule {
+                    graph: graph2,
+                    attach_logs_bearer_token,
+                } => {
+                    let trt = if let Some(bearer) = attach_logs_bearer_token {
+                        let log = &logwbearer[&*bearer];
+                        graph.take_and_merge(
+                            graph2,
+                            |()| {
+                                pbar.inc_length(1);
+                                NodeMeta {
+                                    output: Output::NotStarted,
+                                    log: vec![log.clone()],
+                                }
+                            },
+                            |noder| noder.log.push(log.clone()),
+                        )
+                    } else {
+                        graph.take_and_merge(
+                            graph2,
+                            |()| {
+                                pbar.inc_length(1);
+                                NodeMeta {
+                                    output: Output::NotStarted,
+                                    log: vec![],
+                                }
+                            },
+                            |_| {},
+                        )
+                    };
                     for (_, nid) in trt {
-                        schedule(&store_path, ex, &mains, &jobsem, &mut graph, nid).await;
+                        schedule(&config.store_path, ex, &mains, &jobsem, &mut graph, nid).await;
                     }
                 }
                 MM::Done { nid, det } => {
@@ -593,10 +736,10 @@ fn main() {
                             pbar.inc(1);
                             if let Some(dump) = dump {
                                 let ohs = outhash.to_string();
-                                let dstpath = store_path.join(&ohs).into_std_path_buf();
+                                let dstpath = config.store_path.join(&ohs).into_std_path_buf();
                                 let mut do_write = true;
                                 if dstpath.exists() {
-                                    if auto_repair {
+                                    if config.auto_repair {
                                         match Dump::read_from_path(&dstpath) {
                                             Ok(on_disk_dump) => {
                                                 let on_disk_hash =
@@ -638,7 +781,7 @@ fn main() {
                                     }
                                 }
                                 if let Some(inhash) = inhash {
-                                    let inpath = store_path.join(format!("{}.in", inhash));
+                                    let inpath = config.store_path.join(format!("{}.in", inhash));
                                     let target = format!("{}", outhash).into();
                                     let to_dir = match dump {
                                         Dump::Directory(_) => true,
@@ -660,7 +803,8 @@ fn main() {
                                 .neighbors_directed(nid, Direction::Incoming)
                                 .detach();
                             while let Some(nid2) = next_nodes.next_node(&graph.0) {
-                                schedule(&store_path, ex, &mains, &jobsem, &mut graph, nid2).await;
+                                schedule(&config.store_path, ex, &mains, &jobsem, &mut graph, nid2)
+                                    .await;
                             }
                         }
                         Err(oe) => {
@@ -670,7 +814,7 @@ fn main() {
                             };
                             pbar.println(format!("{}: ERROR: {}", node.name, oe));
                             node.rest.output = Output::Failed(oe);
-                            push_response(&graph, nid, rk).await;
+                            push_response(&mut graph, nid, rk).await;
                         }
                     }
                 }

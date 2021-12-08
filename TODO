@@ -1,13 +1,9 @@
 besides the stuff mentioned in comments throughout the code,
 a few things would be nice to have or somewhat important:
-- authentication
 - dump <- input-hash association signatures (realizations)
 - containerization using crun.
   - setup a chroot
   - and copy the necessary files inside
-- reattaching to logs
-  (partially done because we can now attach multiple loggers)
-- auto-repair of broken store entries
 - build server cluster support (distcc-like)
 - maybe parse ninja files, and the split compile-build-rules
   into two to run preprocessing in a separate step

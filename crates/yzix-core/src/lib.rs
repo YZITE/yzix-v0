@@ -1,8 +1,9 @@
 #![forbid(
-    unsafe_code,
     clippy::cast_ptr_alignment,
     trivial_casts,
-    unconditional_recursion
+    unconditional_recursion,
+    unsafe_code,
+    unused_must_use
 )]
 
 pub mod build_graph;
