@@ -58,12 +58,12 @@ fn main() {
                     )
                     .arg(
                         Arg::with_name("no-attach-to-logs-per-bearer")
-                            .long("no-attach-to-logs")
+                            .long("no-attach-to-logs-per-bearer")
                             .help("don't attach to logging output (per bearer)"),
                     )
                     .arg(
                         Arg::with_name("no-attach-to-logs-for-graph")
-                            .long("no-attach-to-logs")
+                            .long("no-attach-to-logs-for-graph")
                             .help("don't attach to logging output (for graph)"),
                     ),
             )
