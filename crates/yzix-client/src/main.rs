@@ -76,8 +76,8 @@ fn main() {
                             .help("each specified path gets included as a dump")
                             .takes_value(true)
                             .multiple(true)
-                            .required(true)
-                    )
+                            .required(true),
+                    ),
             )
             .get_matches()
     };
@@ -160,7 +160,10 @@ fn main() {
             let p = std::path::Path::new(i);
             graph.0.add_node(bg::Node {
                 name: p.file_name().unwrap().to_str().unwrap().to_string(),
-                kind: bg::NodeKind::UnDump { dat: yzix_core::store::Dump::read_from_path(p).unwrap_or_else(|e| panic!("{}: unable to read source: {}", i, e)) },
+                kind: bg::NodeKind::UnDump {
+                    dat: yzix_core::store::Dump::read_from_path(p)
+                        .unwrap_or_else(|e| panic!("{}: unable to read source: {}", i, e)),
+                },
                 logtag: (startval + tag).try_into().unwrap(),
                 rest: (),
             });
@@ -174,11 +177,8 @@ fn main() {
         ciborium::ser::into_writer(&schedule_cmd, &mut cmd_ser)
             .expect("unable to serialize graph to CBOR");
 
-        let mut stream = establish_connection(
-            matches.value_of("SERVER").unwrap(),
-            true,
-        )
-        .expect("unable to establish connection to yzix server");
+        let mut stream = establish_connection(matches.value_of("SERVER").unwrap(), true)
+            .expect("unable to establish connection to yzix server");
 
         stream
             .write_all(
@@ -191,37 +191,37 @@ fn main() {
             .write_all(&cmd_ser[..])
             .expect("unable to push schedule to server");
 
-            let mut buf = [0u8; 4];
-            let mut dat = Vec::new();
-            let mut stream = std::io::BufReader::new(stream);
-            while stream.read_exact(&mut buf).is_ok() {
-                let len: usize = u32::from_le_bytes(buf)
-                    .try_into()
-                    .expect("unable to deserialize response length");
-                dat.resize(len, 0);
-                stream.read_exact(&mut dat).expect("read failed");
-                let resp: proto::Response =
-                    ciborium::de::from_reader(&dat[..]).expect("unable to deserialize response");
+        let mut buf = [0u8; 4];
+        let mut dat = Vec::new();
+        let mut stream = std::io::BufReader::new(stream);
+        while stream.read_exact(&mut buf).is_ok() {
+            let len: usize = u32::from_le_bytes(buf)
+                .try_into()
+                .expect("unable to deserialize response length");
+            dat.resize(len, 0);
+            stream.read_exact(&mut dat).expect("read failed");
+            let resp: proto::Response =
+                ciborium::de::from_reader(&dat[..]).expect("unable to deserialize response");
 
-                use proto::ResponseKind as RK;
-                let tag = resp.tag;
-                match resp.kind {
-                    RK::LogLine { bldname, content } => {
-                        if tag != 0 {
-                            print!("{}:", tag);
-                        }
-                        println!("{}> {}", bldname, content);
+            use proto::ResponseKind as RK;
+            let tag = resp.tag;
+            match resp.kind {
+                RK::LogLine { bldname, content } => {
+                    if tag != 0 {
+                        print!("{}:", tag);
                     }
-                    RK::Dump(dump) => {
-                        println!("{}:[DUMP] {:?}", tag, dump);
-                    }
-                    RK::OutputNotify(Ok(outhash)) => {
-                        println!("{}:=>{}", tag, outhash);
-                    }
-                    RK::OutputNotify(Err(oe)) => {
-                        println!("{}:[ERROR] {:?}", tag, oe);
-                    }
+                    println!("{}> {}", bldname, content);
                 }
+                RK::Dump(dump) => {
+                    println!("{}:[DUMP] {:?}", tag, dump);
+                }
+                RK::OutputNotify(Ok(outhash)) => {
+                    println!("{}:=>{}", tag, outhash);
+                }
+                RK::OutputNotify(Err(oe)) => {
+                    println!("{}:[ERROR] {:?}", tag, oe);
+                }
+            }
         }
     }
 }

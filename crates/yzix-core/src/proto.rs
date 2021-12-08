@@ -73,6 +73,9 @@ pub enum OutputError {
     #[error("hash collision at {0}")]
     HashCollision(StoreHash),
 
+    #[error("expected file to be available, but expectation wasn't met")]
+    Unavailable,
+
     #[error("store error: {0}")]
     Store(#[from] crate::store::Error),
 

@@ -43,6 +43,10 @@ pub enum NodeKind {
     /// to suppot some distcc-like workflow
     UnDump { dat: crate::store::Dump },
 
+    /// to avoid the need to always upload huge amount of data,
+    /// use this to require a store path to be already present.
+    Require { hash: StoreHash },
+
     /// when this node is reached, send a combined dump of all
     /// inputs (with each input represented as an entry in the
     /// top-level, which is a directory
@@ -96,6 +100,11 @@ pub enum Edge {
     /// e.g. make sure that the output hash is equal to the
     /// output hash of another derivation/node
     AssertEqual,
+
+    /// specify an alternative root directory.
+    /// this changes the build environment to make / read-only,
+    /// and cwd from / to /tmp (the expected output stays ./out)
+    Root,
 }
 
 pub trait ReadOutHash {
@@ -139,6 +148,10 @@ impl<T> Graph<T> {
                 hasher.update(&tmp_ser);
                 hasher.update([0]);
             }
+            // would be pretty useless
+            NodeKind::Require { .. } => {
+                return None;
+            }
             // always build notify nodes
             NodeKind::Dump { .. } => {
                 return None;
@@ -147,17 +160,31 @@ impl<T> Graph<T> {
         let _ = tmp_ser;
 
         for i in self.0.edges(nid) {
-            if let Edge::Placeholder(plh) = &i.weight() {
-                hasher.update(&*plh);
-                hasher.update([0]);
-                hasher.update(
-                    self.0
-                        .node_weight(i.target())
-                        .unwrap()
-                        .rest
-                        .read_out_hash()?,
-                );
-                hasher.update([0]);
+            match i.weight() {
+                Edge::Placeholder(plh) => {
+                    hasher.update(&*plh);
+                    hasher.update([0]);
+                    hasher.update(
+                        self.0
+                            .node_weight(i.target())
+                            .unwrap()
+                            .rest
+                            .read_out_hash()?,
+                    );
+                    hasher.update([0]);
+                }
+                Edge::Root => {
+                    hasher.update("\0{root}\0");
+                    hasher.update(
+                        self.0
+                            .node_weight(i.target())
+                            .unwrap()
+                            .rest
+                            .read_out_hash()?,
+                    );
+                    hasher.update([0]);
+                }
+                _ => {}
             }
         }
 

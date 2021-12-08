@@ -88,11 +88,13 @@ struct WorkItem {
 pub struct WorkItemRun {
     args: Vec<String>,
     envs: HashMap<String, String>,
+    new_root: Option<StoreHash>,
 }
 
 enum WorkItemKind {
     Run(WorkItemRun),
     UnDump(Dump),
+    Require(StoreHash),
     Dump(HashMap<String, StoreHash>),
 }
 
@@ -116,12 +118,14 @@ fn try_make_work_intern(
 
     let mut rphs = HashMap::new();
     let mut expect_hash = None;
+    let mut new_root = None;
 
     for e in g_.0.edges(nid) {
         let (ew, et) = (e.weight(), e.target());
         if let Output::Success(h) = g_.0[et].rest.output {
+            use build_graph::Edge;
             match ew {
-                build_graph::Edge::AssertEqual => {
+                Edge::AssertEqual => {
                     if let Some(x) = expect_hash {
                         if x != h {
                             return Some(Err(OutputError::HashMismatch(x, h)));
@@ -130,7 +134,7 @@ fn try_make_work_intern(
                         expect_hash = Some(h);
                     }
                 }
-                build_graph::Edge::Placeholder(iname) => {
+                Edge::Placeholder(iname) => {
                     use std::collections::hash_map::Entry;
                     match rphs.entry(iname.to_string()) {
                         Entry::Occupied(_) => {
@@ -138,6 +142,12 @@ fn try_make_work_intern(
                         }
                         Entry::Vacant(v) => v.insert(h),
                     };
+                }
+                Edge::Root => {
+                    if new_root.is_some() {
+                        return Some(Err(OutputError::InputDup("{root}".to_string())));
+                    }
+                    new_root = Some(h);
                 }
             }
         } else {
@@ -169,9 +179,14 @@ fn try_make_work_intern(
                 Err(e) => return Some(Err(OutputError::InputNotFound(e))),
             };
 
-            WorkItemKind::Run(WorkItemRun { args, envs })
+            WorkItemKind::Run(WorkItemRun {
+                args,
+                envs,
+                new_root,
+            })
         }
         NK::UnDump { dat } => WorkItemKind::UnDump(dat.clone()),
+        NK::Require { hash } => WorkItemKind::Require(*hash),
         NK::Dump => WorkItemKind::Dump(rphs),
     };
 
@@ -194,7 +209,8 @@ async fn schedule(
     let inhash = graph.hash_node_inputs(nid, config.store_path.as_str().as_bytes());
 
     if let Some(inhash) = inhash {
-        if let Ok(real_path) = std::fs::read_link(config.store_path.join(format!("{}.inp", inhash))) {
+        if let Ok(real_path) = std::fs::read_link(config.store_path.join(format!("{}.inp", inhash)))
+        {
             if real_path.is_relative() && real_path.parent().is_none() {
                 if let Some(real_path) = real_path.file_name().and_then(|rp| rp.to_str()) {
                     if let Ok(cahash) = real_path.parse::<StoreHash>() {
@@ -235,7 +251,8 @@ async fn schedule(
             let mains = mains.clone();
             ex.spawn(async move {
                 let _job = jobsem.acquire().await;
-                let det = handle_process(&config, logtag, inhash, name, wir, expect_hash, log).await;
+                let det =
+                    handle_process(&config, logtag, inhash, name, wir, expect_hash, log).await;
                 let _ = mains.send(MainMessage::Done { nid, det }).await;
             })
             .detach();
@@ -249,6 +266,22 @@ async fn schedule(
             let mut det = Ok(BuiltItem {
                 inhash,
                 dump: Some(dump),
+                outhash,
+            });
+            if let Some(expect_hash) = expect_hash {
+                if expect_hash != outhash {
+                    det = Err(OutputError::HashMismatch(expect_hash, outhash));
+                }
+            }
+            det
+        }
+        Ok(WorkItem {
+            kind: WorkItemKind::Require(outhash),
+            expect_hash,
+        }) => {
+            let mut det = Ok(BuiltItem {
+                inhash: None,
+                dump: None,
                 outhash,
             });
             if let Some(expect_hash) = expect_hash {
@@ -295,20 +328,7 @@ async fn schedule(
                 Err(e) => Err(e.into()),
             }
         }
-        Err(oe) => {
-            // the output is already set to failed, we just need
-            // to send the appropriate log message
-            push_response(
-                graph,
-                nid,
-                ResponseKind::LogLine {
-                    bldname: graph.0[nid].name.clone(),
-                    content: format!("ERROR: {}", oe),
-                },
-            )
-            .await;
-            Err(oe)
-        }
+        Err(oe) => Err(oe),
     };
     // this is necessary to properly update the progress bar
     // and serialization to local store
@@ -464,9 +484,10 @@ fn main() {
                             outhash,
                         }) => {
                             pbar.inc(1);
+                            let ohs = outhash.to_string();
+                            let dstpath = config.store_path.join(&ohs).into_std_path_buf();
+                            let mut err_output = None;
                             if let Some(dump) = dump {
-                                let ohs = outhash.to_string();
-                                let dstpath = config.store_path.join(&ohs).into_std_path_buf();
                                 let mut do_write = true;
                                 if dstpath.exists() {
                                     if config.auto_repair {
@@ -484,10 +505,9 @@ fn main() {
                                                         "ERROR: detected hash collision @ {}",
                                                         outhash
                                                     ));
-                                                    node.rest.output = Output::Failed(
-                                                        OutputError::HashCollision(outhash),
-                                                    );
-                                                    continue;
+                                                    err_output =
+                                                        Some(OutputError::HashCollision(outhash));
+                                                    do_write = false;
                                                 } else {
                                                     do_write = false;
                                                 }
@@ -506,35 +526,51 @@ fn main() {
                                 if do_write {
                                     if let Err(e) = dump.write_to_path(&dstpath, true) {
                                         pbar.println(format!("ERROR: {}", e));
-                                        node.rest.output = Output::Failed(e.into());
-                                        continue;
+                                        err_output = Some(e.into());
                                     }
                                 }
-                                if let Some(inhash) = inhash {
-                                    let inpath = config.store_path.join(format!("{}.in", inhash));
-                                    let target = format!("{}", outhash).into();
-                                    let to_dir = match dump {
-                                        Dump::Directory(_) => true,
-                                        Dump::Regular { .. } => false,
-                                        Dump::SymLink { to_dir, .. } => to_dir,
-                                    };
-                                    if let Err(e) = (Dump::SymLink { target, to_dir })
-                                        .write_to_path(inpath.as_std_path(), true)
-                                    {
-                                        // this is just caching, non-fatal
-                                        pbar.println(format!("ERROR: {}", e));
+                                if err_output.is_none() {
+                                    if let Some(inhash) = inhash {
+                                        let inpath =
+                                            config.store_path.join(format!("{}.in", inhash));
+                                        let target = format!("{}", outhash).into();
+                                        let to_dir = match dump {
+                                            Dump::Directory(_) => true,
+                                            Dump::Regular { .. } => false,
+                                            Dump::SymLink { to_dir, .. } => to_dir,
+                                        };
+                                        if let Err(e) = (Dump::SymLink { target, to_dir })
+                                            .write_to_path(inpath.as_std_path(), true)
+                                        {
+                                            // this is just caching, non-fatal
+                                            pbar.println(format!("ERROR: {}", e));
+                                        }
                                     }
                                 }
                             }
-                            node.rest.output = Output::Success(outhash);
-                            // schedule now available jobs
-                            let mut next_nodes = graph
-                                .0
-                                .neighbors_directed(nid, Direction::Incoming)
-                                .detach();
-                            while let Some(nid2) = next_nodes.next_node(&graph.0) {
-                                schedule(&config, ex, &mains, &jobsem, &mut graph, nid2)
+                            if err_output.is_none() && !dstpath.exists() {
+                                err_output = Some(OutputError::Unavailable);
+                            }
+                            if let Some(e) = err_output {
+                                node.rest.output = Output::Failed(e.clone());
+                                push_response(&mut graph, nid, ResponseKind::OutputNotify(Err(e)))
                                     .await;
+                            } else {
+                                node.rest.output = Output::Success(outhash);
+                                push_response(
+                                    &mut graph,
+                                    nid,
+                                    ResponseKind::OutputNotify(Ok(outhash)),
+                                )
+                                .await;
+                                // schedule now available jobs
+                                let mut next_nodes = graph
+                                    .0
+                                    .neighbors_directed(nid, Direction::Incoming)
+                                    .detach();
+                                while let Some(nid2) = next_nodes.next_node(&graph.0) {
+                                    schedule(&config, ex, &mains, &jobsem, &mut graph, nid2).await;
+                                }
                             }
                         }
                         Err(oe) => {
@@ -598,7 +634,6 @@ fn main() {
                 .collect::<Vec<_>>()
                 .into_iter()
                 .map(|i| graph.0.remove_node(i))
-                .inspect(|i| pbar.println(format!("PRUNED: {:?}", i)))
                 .count();
             if cnt > 0 {
                 // DEBUG

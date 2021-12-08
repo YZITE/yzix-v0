@@ -82,6 +82,7 @@ async fn handle_logging<T: flio::AsyncRead + Unpin, U: flio::AsyncRead + Unpin>(
 fn write_linux_ocirt_spec(
     config: &crate::ServerConfig,
     rootdir: &Path,
+    cwd: &str,
     args: Vec<String>,
     env: Vec<String>,
     specpath: &Path,
@@ -107,7 +108,7 @@ fn write_linux_ocirt_spec(
         .root(
             osr::RootBuilder::default()
                 .path(rootdir)
-                .readonly(false)
+                .readonly(cwd != "/")
                 .build()
                 .unwrap(),
         )
@@ -116,10 +117,16 @@ fn write_linux_ocirt_spec(
         .process(
             osr::ProcessBuilder::default()
                 .terminal(false)
-                .user(osr::UserBuilder::default().uid(0u32).gid(0u32).build().unwrap())
+                .user(
+                    osr::UserBuilder::default()
+                        .uid(0u32)
+                        .gid(0u32)
+                        .build()
+                        .unwrap(),
+                )
                 .args(args)
                 .env(env)
-                .cwd("/")
+                .cwd(cwd)
                 .capabilities(
                     osr::LinuxCapabilitiesBuilder::default()
                         .bounding(caps.clone())
@@ -183,17 +190,33 @@ pub async fn handle_process(
     tag: u64,
     inhash: Option<StoreHash>,
     bldname: String,
-    WorkItemRun { args, envs }: WorkItemRun,
+    WorkItemRun {
+        args,
+        envs,
+        new_root,
+    }: WorkItemRun,
     expect_hash: Option<StoreHash>,
     log: Vec<Sender<LogFwdMessage>>,
 ) -> Result<BuiltItem, OutputError> {
     let workdir = tempfile::tempdir()?;
-    let rootdir = workdir.path().join("rootfs");
+
+    let (rootdir, cwd) = if let Some(new_root) = new_root {
+        (
+            config
+                .store_path
+                .join(new_root.to_string())
+                .into_std_path_buf(),
+            "/tmp",
+        )
+    } else {
+        (workdir.path().join("rootfs"), "/")
+    };
 
     // generate spec
     write_linux_ocirt_spec(
         config,
         &rootdir,
+        cwd,
         args,
         envs.into_iter()
             .map(|(i, j)| format!("{}={}", i, j))
