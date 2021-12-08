@@ -16,6 +16,7 @@ features = ["serde1"]
 
 [dependencies.ciborium]
 version = "0.2"
+path = "../ciborium"
 features = ["std"]
 
 [dependencies.petgraph]

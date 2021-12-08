@@ -260,12 +260,26 @@ fn handle_client_io(
                         {
                             break;
                         }
+                        if mainsi
+                            .send(MainMessage::Log(format!("CBOR ERROR DEBUG: {:?}", buf)))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
                         let val: ciborium::value::Value = match ciborium::de::from_reader(&buf[..]) {
                             Err(_) => break,
                             Ok(x) => x,
                         };
                         if mainsi
                             .send(MainMessage::Log(format!("CBOR ERROR DEBUG: {:#?}", val)))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                        if mainsi
+                            .send(MainMessage::Log(format!("CBOR ERROR DEBUG: {:#?}", val.deserialized::<C>())))
                             .await
                             .is_err()
                         {
