@@ -1,22 +1,10 @@
 {
   "nodes": [
     {
-      "name": "hi",
+      "name": "hi2-require",
       "kind": {
-        "type": "undump",
-        "dat": {
-          "type": "regular",
-          "executable": true,
-          "contents": [
-            101,
-            99,
-            104,
-            111,
-            32,
-            72,
-            105
-          ]
-        }
+        "type": "require",
+        "hash": [126, 32, 200, 38, 46, 188, 84, 0, 136, 124, 188, 133, 192, 109, 132, 57, 62, 152, 98, 112, 177, 12, 21, 140]
       },
       "logtag": 1,
       "rest": null
@@ -37,7 +25,12 @@
         "command": [
           [
             {
-              "String": "bash"
+              "String": "/bin/busybox"
+            }
+          ],
+          [
+            {
+              "String": "sh"
             }
           ],
           [

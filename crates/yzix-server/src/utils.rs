@@ -56,6 +56,7 @@ async fn handle_logging<T: flio::AsyncRead + Unpin, U: flio::AsyncRead + Unpin>(
     use futures_lite::{io::AsyncBufReadExt, stream::StreamExt};
     let mut stream1 = flio::BufReader::new(pipe1).lines();
     let mut stream2 = flio::BufReader::new(pipe2).lines();
+    // FIXME: refactor into channel-forwarding, because `or` sometimes looses data
     while let Some(content) = futures_lite::future::or(stream1.next(), stream2.next()).await {
         let content = match content {
             Ok(x) => x,
@@ -82,7 +83,6 @@ async fn handle_logging<T: flio::AsyncRead + Unpin, U: flio::AsyncRead + Unpin>(
 fn write_linux_ocirt_spec(
     config: &crate::ServerConfig,
     rootdir: &Path,
-    cwd: &str,
     args: Vec<String>,
     env: Vec<String>,
     specpath: &Path,
@@ -108,7 +108,7 @@ fn write_linux_ocirt_spec(
         .root(
             osr::RootBuilder::default()
                 .path(rootdir)
-                .readonly(cwd != "/")
+                .readonly(false)
                 .build()
                 .unwrap(),
         )
@@ -126,7 +126,7 @@ fn write_linux_ocirt_spec(
                 )
                 .args(args)
                 .env(env)
-                .cwd(cwd)
+                .cwd("/")
                 .capabilities(
                     osr::LinuxCapabilitiesBuilder::default()
                         .bounding(caps.clone())
@@ -199,33 +199,32 @@ pub async fn handle_process(
     log: Vec<Sender<LogFwdMessage>>,
 ) -> Result<BuiltItem, OutputError> {
     let workdir = tempfile::tempdir()?;
+    let rootdir = workdir.path().join("rootfs");
 
-    let (rootdir, cwd) = if let Some(new_root) = new_root {
-        (
-            config
+    if let Some(new_root) = new_root {
+        // to work-around read-only stuff and such, copy the tree...
+        Dump::read_from_path(
+            &config
                 .store_path
                 .join(new_root.to_string())
                 .into_std_path_buf(),
-            "/tmp",
-        )
+        )?
+        .write_to_path(&rootdir, true)?;
     } else {
-        (workdir.path().join("rootfs"), "/")
-    };
+        std::fs::create_dir_all(&rootdir)?;
+    }
 
     // generate spec
     write_linux_ocirt_spec(
         config,
         &rootdir,
-        cwd,
         args,
         envs.into_iter()
             .map(|(i, j)| format!("{}={}", i, j))
             .collect(),
         &workdir.path().join("config.json"),
     )?;
-    std::fs::create_dir(&rootdir)?;
 
-    // FIXME: wrap that into a crun invocation
     use async_process::Stdio;
     let mut ch = Command::new(&config.container_runner)
         .args(vec!["run".to_string(), format!("yzix-{}", random_name())])

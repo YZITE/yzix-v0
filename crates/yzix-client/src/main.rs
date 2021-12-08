@@ -216,7 +216,7 @@ fn main() {
                     println!("{}:[DUMP] {:?}", tag, dump);
                 }
                 RK::OutputNotify(Ok(outhash)) => {
-                    println!("{}:=>{}", tag, outhash);
+                    println!("{}:=>{} {:?}", tag, outhash, outhash.0);
                 }
                 RK::OutputNotify(Err(oe)) => {
                     println!("{}:[ERROR] {:?}", tag, oe);

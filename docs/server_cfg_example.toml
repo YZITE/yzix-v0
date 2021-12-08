@@ -1,4 +1,4 @@
-store_path = "/tmp/yzix-store"
+store_path = "/yzixs"
 container_runner = "crun"
 socket_bind = "127.0.0.1:3669"
 bearer_tokens = ["leet"]
