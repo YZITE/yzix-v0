@@ -104,6 +104,8 @@ pub struct BuiltItem {
     outhash: StoreHash,
 }
 
+const INPUT_REALISATION_EXT: &str = "in";
+
 fn try_make_work_intern(
     store_path: &Utf8Path,
     g_: &build_graph::Graph<NodeMeta>,
@@ -209,9 +211,12 @@ async fn schedule(
     let inhash = graph.hash_node_inputs(nid, config.store_path.as_str().as_bytes());
 
     if let Some(inhash) = inhash {
-        if let Ok(real_path) = std::fs::read_link(config.store_path.join(format!("{}.inp", inhash)))
-        {
-            if real_path.is_relative() && real_path.parent().is_none() {
+        if let Ok(real_path) = std::fs::read_link(
+            config
+                .store_path
+                .join(format!("{}.{}", inhash, INPUT_REALISATION_EXT)),
+        ) {
+            if real_path.is_relative() && real_path.parent() == Some(std::path::Path::new("")) {
                 if let Some(real_path) = real_path.file_name().and_then(|rp| rp.to_str()) {
                     if let Ok(cahash) = real_path.parse::<StoreHash>() {
                         // lucky case: we have found a valid shortcut!
@@ -531,8 +536,9 @@ fn main() {
                                 }
                                 if err_output.is_none() {
                                     if let Some(inhash) = inhash {
-                                        let inpath =
-                                            config.store_path.join(format!("{}.in", inhash));
+                                        let inpath = config
+                                            .store_path
+                                            .join(format!("{}.{}", inhash, INPUT_REALISATION_EXT));
                                         let target = format!("{}", outhash).into();
                                         let to_dir = match dump {
                                             Dump::Directory(_) => true,

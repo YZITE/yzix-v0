@@ -26,7 +26,11 @@ fn establish_connection(
             .expect("unable to serialize client options to CBOR");
 
         stream
-            .write_all(&proto::Length::try_from(opts_ser.len()).unwrap().to_le_bytes())
+            .write_all(
+                &proto::Length::try_from(opts_ser.len())
+                    .unwrap()
+                    .to_le_bytes(),
+            )
             .expect("unable to login");
         stream.write_all(&opts_ser[..]).expect("unable to login");
     }
