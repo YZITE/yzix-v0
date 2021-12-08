@@ -4,6 +4,8 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
+pub type Length = u64;
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum ControlCommand {
     /// schedule a bunch of commands

@@ -26,7 +26,7 @@ fn establish_connection(
             .expect("unable to serialize client options to CBOR");
 
         stream
-            .write_all(&u32::try_from(opts_ser.len()).unwrap().to_le_bytes())
+            .write_all(&proto::Length::try_from(opts_ser.len()).unwrap().to_le_bytes())
             .expect("unable to login");
         stream.write_all(&opts_ser[..]).expect("unable to login");
     }
@@ -105,7 +105,7 @@ fn main() {
 
         stream
             .write_all(
-                &u32::try_from(cmd_ser.len())
+                &proto::Length::try_from(cmd_ser.len())
                     .expect("unable to serialize command length (graph too big?)")
                     .to_le_bytes(),
             )
@@ -117,11 +117,11 @@ fn main() {
         if !scmd.is_present("no-attach-to-logs-per-bearer")
             && !scmd.is_present("no-attach-to-logs-for-graph")
         {
-            let mut buf = [0u8; 4];
+            let mut buf = [0u8; std::mem::size_of::<proto::Length>()];
             let mut dat = Vec::new();
             let mut stream = std::io::BufReader::new(stream);
             while stream.read_exact(&mut buf).is_ok() {
-                let len: usize = u32::from_le_bytes(buf)
+                let len: usize = proto::Length::from_le_bytes(buf)
                     .try_into()
                     .expect("unable to deserialize response length");
                 dat.resize(len, 0);
@@ -182,7 +182,7 @@ fn main() {
 
         stream
             .write_all(
-                &u32::try_from(cmd_ser.len())
+                &proto::Length::try_from(cmd_ser.len())
                     .expect("unable to serialize command length (graph too big?)")
                     .to_le_bytes(),
             )
@@ -191,11 +191,11 @@ fn main() {
             .write_all(&cmd_ser[..])
             .expect("unable to push schedule to server");
 
-        let mut buf = [0u8; 4];
+        let mut buf = [0u8; std::mem::size_of::<proto::Length>()];
         let mut dat = Vec::new();
         let mut stream = std::io::BufReader::new(stream);
         while stream.read_exact(&mut buf).is_ok() {
-            let len: usize = u32::from_le_bytes(buf)
+            let len: usize = proto::Length::from_le_bytes(buf)
                 .try_into()
                 .expect("unable to deserialize response length");
             dat.resize(len, 0);
