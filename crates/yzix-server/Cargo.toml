@@ -22,7 +22,6 @@ tempfile = "3.2"
 thiserror = "1.0"
 toml = "0.5"
 yz-server-executor = "0.2"
-stats_alloc = "0.1.8"
 
 [dependencies.smallvec]
 version = "1.7"

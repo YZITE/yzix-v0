@@ -17,10 +17,6 @@ use yzix_core::proto::{self, OutputError, Response, ResponseKind};
 use yzix_core::store::{Dump, Hash as StoreHash};
 use yzix_core::{Utf8Path, Utf8PathBuf};
 
-// allow reasonable accurate measuring of memory usage
-#[global_allocator]
-static GLOBAL: &stats_alloc::StatsAlloc<std::alloc::System> = &stats_alloc::INSTRUMENTED_SYSTEM;
-
 mod clients;
 use clients::{handle_client_io, handle_clients_initial};
 mod utils;
@@ -430,7 +426,6 @@ fn main() {
 
         use MainMessage as MM;
         while let Ok(x) = mainr.recv().await {
-            println!("[_] memusage: ~ {} KiB", memory_usage() / 1024);
             match x {
                 MM::Shutdown => break,
                 MM::Log(logline) => println!("{}", logline),
@@ -599,12 +594,9 @@ fn main() {
             if graph.0.node_count() == 0 {
                 continue;
             } else if graph.0.node_count() < 1000 {
-                let mw = memory_usage();
-                // DEBUG
-                println!("memusage: ~ {} KiB", mw / 1024);
-                if mw < 0x100000 {
-                    continue;
-                }
+                //if mw < 0x100000 {
+                //    continue;
+                //}
             }
 
             // propagate failures
@@ -658,7 +650,6 @@ fn main() {
                     // reset to reclaim memory
                     println!("reset to reclaim memory");
                     graph.0 = Default::default();
-                    println!("memusage: ~ {} KiB", memory_usage() / 1024);
                 }
             }
         }

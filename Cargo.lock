@@ -843,12 +843,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "stats_alloc"
-version = "0.1.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a260c96bf26273969f360c2fc2e2c7732acc2ce49d939c7243c7230c2ad179d0"
-
-[[package]]
 name = "strsim"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1055,7 +1049,6 @@ dependencies = [
  "serde",
  "serde_json",
  "smallvec",
- "stats_alloc",
  "tempfile",
  "thiserror",
  "toml",
