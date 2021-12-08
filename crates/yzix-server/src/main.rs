@@ -23,11 +23,14 @@ mod utils;
 use utils::*;
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-struct ServerConfig {
+pub struct ServerConfig {
     store_path: Utf8PathBuf,
+    container_runner: String,
     socket_bind: String,
     bearer_tokens: HashSet<String>,
     auto_repair: bool,
+    worker_uid: u32,
+    worker_gid: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -83,7 +86,6 @@ struct WorkItem {
 }
 
 pub struct WorkItemRun {
-    cmd: String,
     args: Vec<String>,
     envs: HashMap<String, String>,
 }
@@ -148,17 +150,14 @@ fn try_make_work_intern(
 
     let kind = match &pnw.kind {
         NK::Run { command, envs } => {
-            let (cmd, args) = match command
+            let args = match command
                 .iter()
                 .map(|i| eval_pat(store_path, &rphs, i))
                 .collect::<Result<Vec<_>, _>>()
             {
                 Err(e) => return Some(Err(OutputError::InputNotFound(e))),
                 Ok(x) if x.is_empty() => return Some(Err(OutputError::EmptyCommand)),
-                Ok(mut command) => {
-                    let cmd = command.remove(0);
-                    (cmd, command)
-                }
+                Ok(x) => x,
             };
 
             let envs = match envs
@@ -170,7 +169,7 @@ fn try_make_work_intern(
                 Err(e) => return Some(Err(OutputError::InputNotFound(e))),
             };
 
-            WorkItemKind::Run(WorkItemRun { cmd, args, envs })
+            WorkItemKind::Run(WorkItemRun { args, envs })
         }
         NK::UnDump { dat } => WorkItemKind::UnDump(dat.clone()),
         NK::Dump => WorkItemKind::Dump(rphs),
@@ -180,22 +179,22 @@ fn try_make_work_intern(
 }
 
 async fn schedule(
-    store_path: &Utf8Path,
+    config: &Arc<ServerConfig>,
     ex: &Executor<'static>,
     mains: &Sender<MainMessage>,
     jobsem: &Arc<Semaphore>,
     graph: &mut build_graph::Graph<NodeMeta>,
     nid: NodeIndex,
 ) {
-    let ret = match try_make_work_intern(store_path, graph, nid) {
+    let ret = match try_make_work_intern(&config.store_path, graph, nid) {
         None => return, // inputs missing
         Some(x) => x,
     };
 
-    let inhash = graph.hash_node_inputs(nid, store_path.as_str().as_bytes());
+    let inhash = graph.hash_node_inputs(nid, config.store_path.as_str().as_bytes());
 
     if let Some(inhash) = inhash {
-        if let Ok(real_path) = std::fs::read_link(store_path.join(format!("{}.inp", inhash))) {
+        if let Ok(real_path) = std::fs::read_link(config.store_path.join(format!("{}.inp", inhash))) {
             if real_path.is_relative() && real_path.parent().is_none() {
                 if let Some(real_path) = real_path.file_name().and_then(|rp| rp.to_str()) {
                     if let Ok(cahash) = real_path.parse::<StoreHash>() {
@@ -229,13 +228,14 @@ async fn schedule(
         }) => {
             let ni = &graph.0[nid];
             let logtag = ni.logtag;
+            let config = config.clone();
             let name = ni.name.clone();
             let log = ni.rest.log.clone();
             let jobsem = jobsem.clone();
             let mains = mains.clone();
             ex.spawn(async move {
                 let _job = jobsem.acquire().await;
-                let det = handle_process(logtag, inhash, name, wir, expect_hash, log).await;
+                let det = handle_process(&config, logtag, inhash, name, wir, expect_hash, log).await;
                 let _ = mains.send(MainMessage::Done { nid, det }).await;
             })
             .detach();
@@ -265,7 +265,7 @@ async fn schedule(
             match hsh
                 .into_iter()
                 .map(|(k, v)| {
-                    Dump::read_from_path(store_path.join(v.to_string()).as_std_path())
+                    Dump::read_from_path(config.store_path.join(v.to_string()).as_std_path())
                         .map(|vd| (k, vd))
                 })
                 .collect()
@@ -339,6 +339,7 @@ fn main() {
         toml::de::from_slice(&std::fs::read(arg).expect("unable to read supplied config file"))
             .expect("unable to parse supplied config file")
     };
+    let config = Arc::new(config);
 
     std::fs::create_dir_all(&config.store_path).expect("unable to create store dir");
 
@@ -451,7 +452,7 @@ fn main() {
                         )
                     };
                     for (_, nid) in trt {
-                        schedule(&config.store_path, ex, &mains, &jobsem, &mut graph, nid).await;
+                        schedule(&config, ex, &mains, &jobsem, &mut graph, nid).await;
                     }
                 }
                 MM::Done { nid, det } => {
@@ -532,7 +533,7 @@ fn main() {
                                 .neighbors_directed(nid, Direction::Incoming)
                                 .detach();
                             while let Some(nid2) = next_nodes.next_node(&graph.0) {
-                                schedule(&config.store_path, ex, &mains, &jobsem, &mut graph, nid2)
+                                schedule(&config, ex, &mains, &jobsem, &mut graph, nid2)
                                     .await;
                             }
                         }

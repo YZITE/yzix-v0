@@ -1,9 +1,7 @@
 besides the stuff mentioned in comments throughout the code,
 a few things would be nice to have or somewhat important:
 - dump <- input-hash association signatures (realizations)
-- containerization using crun.
-  - setup a chroot
-  - and copy the necessary files inside
+- maybe more restricted containerization?
 - build server cluster support (distcc-like)
 - maybe parse ninja files, and the split compile-build-rules
   into two to run preprocessing in a separate step

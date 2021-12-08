@@ -1,10 +1,10 @@
+use crate::MainMessage;
 use async_channel::{Receiver, Sender};
 use futures_lite::{future::zip, io as flio, AsyncReadExt, AsyncWriteExt};
-use std::collections::{HashSet};
+use std::collections::HashSet;
 use std::{future::Future, sync::Arc};
+use yzix_core::ciborium;
 use yzix_core::proto::{self, Response};
-use yzix_core::{ciborium};
-use crate::MainMessage;
 
 pub fn handle_client_io(
     mains: &Sender<MainMessage>,
@@ -45,7 +45,8 @@ pub fn handle_client_io(
                         {
                             break;
                         }
-                        let val: ciborium::value::Value = match ciborium::de::from_reader(&buf[..]) {
+                        let val: ciborium::value::Value = match ciborium::de::from_reader(&buf[..])
+                        {
                             Err(_) => break,
                             Ok(x) => x,
                         };
@@ -57,7 +58,7 @@ pub fn handle_client_io(
                             break;
                         }
                         break;
-                    },
+                    }
                 };
                 if mainsi
                     .send(match cmd {

@@ -1,13 +1,13 @@
-use async_channel::{Sender};
+use crate::{BuiltItem, LogFwdMessage, NodeMeta, WorkItemRun};
+use async_channel::Sender;
 use async_process::Command;
 use futures_lite::{future::zip, io as flio};
-use std::collections::{HashMap};
-use std::{future::Future, marker::Unpin, sync::Arc};
+use std::collections::{HashMap, HashSet};
+use std::{future::Future, marker::Unpin, path::Path, sync::Arc};
 use yzix_core::build_graph::{self, NodeIndex};
 use yzix_core::proto::{OutputError, Response, ResponseKind};
 use yzix_core::store::{Dump, Hash as StoreHash};
-use yzix_core::{Utf8Path};
-use crate::{NodeMeta, LogFwdMessage, WorkItemRun, BuiltItem};
+use yzix_core::Utf8Path;
 
 pub async fn log_to_bunch<T: Clone>(subs: &mut Vec<Sender<T>>, msg: T) {
     let mut cnt = 0usize;
@@ -79,22 +79,133 @@ async fn handle_logging<T: flio::AsyncRead + Unpin, U: flio::AsyncRead + Unpin>(
     }
 }
 
+fn write_linux_ocirt_spec(
+    config: &crate::ServerConfig,
+    rootdir: &Path,
+    args: Vec<String>,
+    env: Vec<String>,
+    specpath: &Path,
+) -> std::io::Result<()> {
+    // NOTE: windows support is harder, because we need to use a hyperv container there...
+    use oci_spec::runtime as osr;
+    let mut mounts = osr::get_default_mounts();
+    mounts.push(
+        osr::MountBuilder::default()
+            .destination(&config.store_path)
+            .source(&config.store_path)
+            .typ("none")
+            .options(vec!["bind".to_string()])
+            .build()
+            .unwrap(),
+    );
+    let mut caps = HashSet::new();
+    caps.insert(osr::Capability::BlockSuspend);
+    let mut ropaths = osr::get_default_readonly_paths();
+    ropaths.push(config.store_path.to_string());
+    let spec = osr::SpecBuilder::default()
+        .version("1.0.0")
+        .root(
+            osr::RootBuilder::default()
+                .path(rootdir)
+                .readonly(false)
+                .build()
+                .unwrap(),
+        )
+        .hostname("yzix")
+        .mounts(mounts)
+        .process(
+            osr::ProcessBuilder::default()
+                .terminal(false)
+                .user(osr::UserBuilder::default().uid(0u32).gid(0u32).build().unwrap())
+                .args(args)
+                .env(env)
+                .cwd("/")
+                .capabilities(
+                    osr::LinuxCapabilitiesBuilder::default()
+                        .bounding(caps.clone())
+                        .effective(caps.clone())
+                        .inheritable(caps.clone())
+                        .permitted(caps.clone())
+                        .ambient(caps)
+                        .build()
+                        .unwrap(),
+                )
+                .rlimits(vec![osr::LinuxRlimitBuilder::default()
+                    .typ(osr::LinuxRlimitType::RlimitNofile)
+                    .hard(4096u64)
+                    .soft(1024u64)
+                    .build()
+                    .unwrap()])
+                .no_new_privileges(true)
+                .build()
+                .unwrap(),
+        )
+        .linux(
+            osr::LinuxBuilder::default()
+                .uid_mappings(vec![osr::LinuxIdMappingBuilder::default()
+                    .host_id(config.worker_uid)
+                    .container_id(0u32)
+                    .size(1u32)
+                    .build()
+                    .unwrap()])
+                .gid_mappings(vec![osr::LinuxIdMappingBuilder::default()
+                    .host_id(config.worker_gid)
+                    .container_id(0u32)
+                    .size(1u32)
+                    .build()
+                    .unwrap()])
+                .namespaces(osr::get_default_namespaces())
+                .masked_paths(osr::get_default_maskedpaths())
+                .readonly_paths(ropaths)
+                .build()
+                .unwrap(),
+        )
+        .build()
+        .unwrap();
+
+    std::fs::write(
+        specpath,
+        serde_json::to_string(&spec).expect("unable to serialize OCI spec"),
+    )
+}
+
+fn random_name() -> String {
+    use rand::prelude::*;
+    let mut rng = rand::thread_rng();
+    std::iter::repeat(())
+        .take(20)
+        .map(|()| char::from_u32(rng.gen_range(b'a'..=b'z').into()).unwrap())
+        .collect::<String>()
+}
+
 pub async fn handle_process(
+    config: &crate::ServerConfig,
     tag: u64,
     inhash: Option<StoreHash>,
     bldname: String,
-    WorkItemRun { cmd, args, envs }: WorkItemRun,
+    WorkItemRun { args, envs }: WorkItemRun,
     expect_hash: Option<StoreHash>,
     log: Vec<Sender<LogFwdMessage>>,
 ) -> Result<BuiltItem, OutputError> {
     let workdir = tempfile::tempdir()?;
+    let rootdir = workdir.path().join("rootfs");
+
+    // generate spec
+    write_linux_ocirt_spec(
+        config,
+        &rootdir,
+        args,
+        envs.into_iter()
+            .map(|(i, j)| format!("{}={}", i, j))
+            .collect(),
+        &workdir.path().join("config.json"),
+    )?;
+    std::fs::create_dir(&rootdir)?;
 
     // FIXME: wrap that into a crun invocation
     use async_process::Stdio;
-    let mut ch = Command::new(cmd)
-        // TODO: insert .env_clear()
-        .args(args)
-        .envs(envs)
+    let mut ch = Command::new(&config.container_runner)
+        .args(vec!["run".to_string(), format!("yzix-{}", random_name())])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

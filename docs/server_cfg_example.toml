@@ -1,4 +1,7 @@
 store_path = "/tmp/yzix-store"
+container_runner = "crun"
 socket_bind = "127.0.0.1:3669"
 bearer_tokens = ["leet"]
 auto_repair = true
+worker_uid = 1000
+worker_gid = 100
