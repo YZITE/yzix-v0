@@ -299,6 +299,10 @@ impl Dump {
                     Dump::write_to_path(val, &xs, force)?;
                     xs.pop();
                 }
+
+                #[cfg(unix)]
+                fs::set_permissions(x, std::os::unix::fs::PermissionsExt::from_mode(0o555))
+                    .map_err(&mapef)?;
             }
         }
         filetime::set_symlink_file_times(x, reftime, reftime).map_err(&mapef)
