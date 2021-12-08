@@ -8,3 +8,4 @@ a few things would be nice to have or somewhat important:
   (this approach is similar to what distcc uses to decouple from input)
 - proper cancellation of builds
 - proper dump verification and repair (start repair as soon as detecting corruption)
+- S3 support

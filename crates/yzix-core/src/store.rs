@@ -2,8 +2,12 @@ use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
 use std::{convert, fmt, fs};
 
+// we can't use > 32 because serde (1.0.130) doesn't derive
+// Deserialize... etc. for array lengths > 32.
+const HASH_LEN: usize = 32;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
-pub struct Hash(pub [u8; 24]);
+pub struct Hash(pub [u8; HASH_LEN]);
 
 const B64_CFG: base64::Config = base64::URL_SAFE_NO_PAD;
 
@@ -35,12 +39,12 @@ impl Hash {
     #[inline]
     pub fn get_hasher() -> blake2::VarBlake2b {
         use blake2::digest::VariableOutput;
-        blake2::VarBlake2b::new(24).unwrap()
+        blake2::VarBlake2b::new(HASH_LEN).unwrap()
     }
 
     pub fn finalize_hasher(x: blake2::VarBlake2b) -> Self {
         use blake2::digest::VariableOutput;
-        let mut hash = Self([0u8; 24]);
+        let mut hash = Self([0u8; HASH_LEN]);
         x.finalize_variable(|res| hash.0.copy_from_slice(res));
         hash
     }
