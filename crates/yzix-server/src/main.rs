@@ -373,7 +373,6 @@ fn main() {
     std::fs::create_dir_all(&config.store_path).expect("unable to create store dir");
 
     let cpucnt = num_cpus::get();
-    let pbar = indicatif::ProgressBar::new(0);
     let ex = Arc::new(yz_server_executor::ServerExecutor::with_threads(cpucnt));
     let jobsem = Arc::new(Semaphore::new(cpucnt));
 
@@ -431,10 +430,10 @@ fn main() {
 
         use MainMessage as MM;
         while let Ok(x) = mainr.recv().await {
-            pbar.println(format!("[_] memusage: ~ {} KiB", memory_usage() / 1024));
+            println!("[_] memusage: ~ {} KiB", memory_usage() / 1024);
             match x {
                 MM::Shutdown => break,
-                MM::Log(logline) => pbar.println(logline),
+                MM::Log(logline) => println!("{}", logline),
                 MM::ClientConn { conn, opts } => {
                     ex.spawn(handle_client_io(
                         &mains,
@@ -460,7 +459,6 @@ fn main() {
                         graph.take_and_merge(
                             graph2,
                             |()| {
-                                pbar.inc_length(1);
                                 NodeMeta {
                                     output: Output::NotStarted,
                                     log: smallvec::smallvec![log.clone()],
@@ -472,7 +470,6 @@ fn main() {
                         graph.take_and_merge(
                             graph2,
                             |()| {
-                                pbar.inc_length(1);
                                 NodeMeta {
                                     output: Output::NotStarted,
                                     log: smallvec::smallvec![],
@@ -493,7 +490,6 @@ fn main() {
                             dump,
                             outhash,
                         }) => {
-                            pbar.inc(1);
                             let ohs = outhash.to_string();
                             let dstpath = config.store_path.join(&ohs).into_std_path_buf();
                             let mut err_output = None;
@@ -506,15 +502,15 @@ fn main() {
                                                 let on_disk_hash =
                                                     StoreHash::hash_complex(&on_disk_dump);
                                                 if on_disk_hash != outhash {
-                                                    pbar.println(format!(
+                                                    println!(
                                                         "WARNING: detected data corruption @ {}",
                                                         outhash
-                                                    ));
+                                                    );
                                                 } else if on_disk_dump != dump {
-                                                    pbar.println(format!(
+                                                    println!(
                                                         "ERROR: detected hash collision @ {}",
                                                         outhash
-                                                    ));
+                                                    );
                                                     err_output =
                                                         Some(OutputError::HashCollision(outhash));
                                                     do_write = false;
@@ -523,10 +519,10 @@ fn main() {
                                                 }
                                             }
                                             Err(e) => {
-                                                pbar.println(format!(
+                                                println!(
                                                     "WARNING: error while dumping @ {}: {}",
                                                     outhash, e
-                                                ));
+                                                );
                                             }
                                         }
                                     } else {
@@ -535,7 +531,7 @@ fn main() {
                                 }
                                 if do_write {
                                     if let Err(e) = dump.write_to_path(&dstpath, true) {
-                                        pbar.println(format!("ERROR: {}", e));
+                                        println!("ERROR: {}", e);
                                         err_output = Some(e.into());
                                     }
                                 }
@@ -554,7 +550,7 @@ fn main() {
                                             .write_to_path(inpath.as_std_path(), true)
                                         {
                                             // this is just caching, non-fatal
-                                            pbar.println(format!("ERROR: {}", e));
+                                            println!("ERROR: {}", e);
                                         }
                                     }
                                 }
@@ -589,7 +585,7 @@ fn main() {
                                 bldname: node.name.clone(),
                                 content: format!("ERROR: {}", oe),
                             };
-                            pbar.println(format!("{}: ERROR: {}", node.name, oe));
+                            println!("{}: ERROR: {}", node.name, oe);
                             node.rest.output = Output::Failed(oe);
                             push_response(&mut graph, nid, rk).await;
                         }
@@ -605,7 +601,7 @@ fn main() {
             } else if graph.0.node_count() < 1000 {
                 let mw = memory_usage();
                 // DEBUG
-                pbar.println(format!("memusage: ~ {} KiB", mw / 1024));
+                println!("memusage: ~ {} KiB", mw / 1024);
                 if mw < 0x100000 {
                     continue;
                 }
@@ -623,7 +619,7 @@ fn main() {
                     let mo = &mut graph.0[js].rest.output;
                     if *mo == Output::NotStarted {
                         *mo = Output::Scheduled;
-                        // keep pbar and such in sync
+                        // keep scheduler in sync
                         mains
                             .send(MainMessage::Done {
                                 nid: js,
@@ -657,12 +653,12 @@ fn main() {
                 .count();
             if cnt > 0 {
                 // DEBUG
-                pbar.println(format!("pruned {} node(s)", cnt));
+                println!("pruned {} node(s)", cnt);
                 if graph.0.node_count() == 0 {
                     // reset to reclaim memory
-                    pbar.println(format!("reset to reclaim memory"));
+                    println!("reset to reclaim memory");
                     graph.0 = Default::default();
-                    pbar.println(format!("memusage: ~ {} KiB", memory_usage() / 1024));
+                    println!("memusage: ~ {} KiB", memory_usage() / 1024);
                 }
             }
         }
