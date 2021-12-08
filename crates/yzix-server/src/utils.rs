@@ -210,16 +210,12 @@ pub async fn handle_process(
                 .into_std_path_buf(),
         )?
         .write_to_path(&rootdir, true)?;
+        let mut perms = std::fs::metadata(&rootdir)?.permissions();
+        perms.set_readonly(false);
+        std::fs::set_permissions(&rootdir, perms)?;
     } else {
         std::fs::create_dir_all(&rootdir)?;
     }
-
-    #[cfg(unix)]
-    nix::unistd::chown(
-        &rootdir,
-        Some(nix::unistd::Uid::from_raw(config.worker_uid)),
-        Some(nix::unistd::Gid::from_raw(config.worker_gid)),
-    )?;
 
     // generate spec
     write_linux_ocirt_spec(
@@ -249,7 +245,7 @@ pub async fn handle_process(
     );
     let exs = zip(x, ch.status()).await.1?;
     if exs.success() {
-        let dump = Dump::read_from_path(&workdir.path().join("out"))?;
+        let dump = Dump::read_from_path(&rootdir.join("out"))?;
         let hash = StoreHash::hash_complex(&dump);
         if let Some(expect_hash) = expect_hash {
             if hash != expect_hash {

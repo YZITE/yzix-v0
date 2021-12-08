@@ -1,4 +1,5 @@
 echo Hi
 ls -las
-id
 touch out
+ping -c 1 8.8.8.8
+ls -las

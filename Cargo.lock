@@ -1106,7 +1106,6 @@ dependencies = [
  "futures-lite",
  "futures-util",
  "indicatif",
- "nix",
  "num_cpus",
  "oci-spec",
  "rand",
