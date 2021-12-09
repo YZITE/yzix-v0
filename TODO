@@ -9,3 +9,5 @@ a few things would be nice to have or somewhat important:
 - proper cancellation of builds
 - proper dump verification and repair (start repair as soon as detecting corruption)
 - S3 support
+- reduce the amount of async channels in the server
+- regularly print progress for downloads
