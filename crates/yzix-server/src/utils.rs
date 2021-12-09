@@ -6,12 +6,12 @@ use futures_util::{
     io::{AsyncBufReadExt, AsyncRead, BufReader},
     stream::StreamExt,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::{future::Future, marker::Unpin, path::Path, sync::Arc};
-use yzix_core::build_graph::{self, NodeIndex};
-use yzix_core::proto::{OutputError, Response, ResponseKind};
+use yzix_core::build_graph;
 use yzix_core::store::{Dump, Hash as StoreHash};
 use yzix_core::Utf8Path;
+use yzix_core::{OutputError, Response, ResponseKind};
 
 pub async fn log_to_bunch<T: Clone>(subs: &mut smallvec::SmallVec<[Sender<T>; 1]>, msg: T) {
     let mut cnt = 0usize;
@@ -35,11 +35,9 @@ pub async fn log_to_bunch<T: Clone>(subs: &mut smallvec::SmallVec<[Sender<T>; 1]
 }
 
 pub fn push_response(
-    g_: &mut build_graph::Graph<NodeMeta>,
-    nid: NodeIndex,
+    n: &mut build_graph::Node<NodeMeta>,
     kind: ResponseKind,
 ) -> impl Future<Output = ()> + '_ {
-    let n = &mut g_.0[nid];
     log_to_bunch(
         &mut n.rest.log,
         LogFwdMessage::Response(Arc::new(Response {
@@ -186,16 +184,16 @@ fn random_name() -> String {
 
 pub async fn handle_process(
     config: &crate::ServerConfig,
-    tag: u64,
-    inhash: Option<StoreHash>,
-    bldname: String,
     WorkItemRun {
+        inhash,
+        bldname,
         args,
         envs,
         new_root,
+        outputs,
+        log,
+        logtag,
     }: WorkItemRun,
-    expect_hash: Option<StoreHash>,
-    log: smallvec::SmallVec<[Sender<LogFwdMessage>; 1]>,
 ) -> Result<BuiltItem, OutputError> {
     let workdir = tempfile::tempdir()?;
     let rootdir = workdir.path().join("rootfs");
@@ -234,25 +232,21 @@ pub async fn handle_process(
         .stderr(Stdio::piped())
         .current_dir(workdir.path())
         .spawn()?;
-    let x = handle_logging(tag, &bldname, log.clone(), ch.stdout.take().unwrap());
-    let y = handle_logging(tag, &bldname, log, ch.stderr.take().unwrap());
+    let x = handle_logging(logtag, &bldname, log.clone(), ch.stdout.take().unwrap());
+    let y = handle_logging(logtag, &bldname, log, ch.stderr.take().unwrap());
 
     let exs = join(join(x, y), ch.status()).await.1?;
     if exs.success() {
-        let dump = Dump::read_from_path(&rootdir.join("out"))?;
-        let hash = StoreHash::hash_complex(&dump);
-        if let Some(expect_hash) = expect_hash {
-            if hash != expect_hash {
-                return Err(OutputError::HashMismatch {
-                    expected: expect_hash,
-                    got: hash,
-                });
-            }
-        }
         Ok(BuiltItem {
             inhash,
-            dump: Some(std::sync::Arc::new(dump)),
-            outhash: hash,
+            outputs: outputs
+                .into_iter()
+                .map(|i| {
+                    let dump = Dump::read_from_path(&rootdir.join("out"))?;
+                    let outhash = StoreHash::hash_complex(&dump);
+                    Ok((i, (Some(std::sync::Arc::new(dump)), outhash)))
+                })
+                .collect::<Result<_, yzix_core::store::Error>>()?,
         })
     } else if let Some(x) = exs.code() {
         Err(OutputError::Exit(x))
@@ -264,30 +258,6 @@ pub async fn handle_process(
 
         Err(OutputError::Unknown(exs.to_string()))
     }
-}
-
-pub fn eval_pat(
-    store_path: &Utf8Path,
-    rphs: &HashMap<String, StoreHash>,
-    xs: &[build_graph::CmdArgSnip],
-) -> Result<String, String> {
-    // NOTE: do not use an iterator chain here,
-    // as looping lets us handle string and returning more efficiently
-    let mut ret = String::new();
-    for x in xs {
-        use build_graph::CmdArgSnip as CArgS;
-        match x {
-            CArgS::String(s) => ret += s,
-            CArgS::Placeholder(iname) => {
-                if let Some(y) = rphs.get(iname) {
-                    ret += store_path.join(y.to_string()).as_str();
-                } else {
-                    return Err(iname.to_string());
-                }
-            }
-        }
-    }
-    Ok(ret)
 }
 
 pub fn read_graph_from_store(

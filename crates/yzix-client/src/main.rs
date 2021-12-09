@@ -1,5 +1,5 @@
 use std::io::{Read, Write};
-use yzix_core::{ciborium, proto};
+use yzix_core::{ciborium, ControlCommand, Response, ResponseKind as RK};
 
 fn establish_connection(
     server: &str,
@@ -17,7 +17,7 @@ fn establish_connection(
     let mut stream = std::io::BufWriter::new(std::net::TcpStream::connect(server)?);
 
     {
-        let opts = proto::ClientOpts {
+        let opts = yzix_core::ClientOpts {
             bearer_auth,
             attach_to_logs,
         };
@@ -27,7 +27,7 @@ fn establish_connection(
 
         stream
             .write_all(
-                &proto::Length::try_from(opts_ser.len())
+                &yzix_core::Length::try_from(opts_ser.len())
                     .unwrap()
                     .to_le_bytes(),
             )
@@ -93,7 +93,7 @@ fn main() {
             ))
             .expect("unable to parse graph from file");
 
-        let schedule_cmd = proto::ControlCommand::Schedule {
+        let schedule_cmd = ControlCommand::Schedule {
             graph,
             attach_to_logs: !scmd.is_present("no-attach-to-logs-for-graph"),
         };
@@ -109,7 +109,7 @@ fn main() {
 
         stream
             .write_all(
-                &proto::Length::try_from(cmd_ser.len())
+                &yzix_core::Length::try_from(cmd_ser.len())
                     .expect("unable to serialize command length (graph too big?)")
                     .to_le_bytes(),
             )
@@ -121,19 +121,18 @@ fn main() {
         if !scmd.is_present("no-attach-to-logs-per-bearer")
             && !scmd.is_present("no-attach-to-logs-for-graph")
         {
-            let mut buf = [0u8; std::mem::size_of::<proto::Length>()];
+            let mut buf = [0u8; std::mem::size_of::<yzix_core::Length>()];
             let mut dat = Vec::new();
             let mut stream = std::io::BufReader::new(stream);
             while stream.read_exact(&mut buf).is_ok() {
-                let len: usize = proto::Length::from_le_bytes(buf)
+                let len: usize = yzix_core::Length::from_le_bytes(buf)
                     .try_into()
                     .expect("unable to deserialize response length");
                 dat.resize(len, 0);
                 stream.read_exact(&mut dat).expect("read failed");
-                let resp: proto::Response =
+                let resp: Response =
                     ciborium::de::from_reader(&dat[..]).expect("unable to deserialize response");
 
-                use proto::ResponseKind as RK;
                 let tag = resp.tag;
                 match resp.kind {
                     RK::LogLine { bldname, content } => {
@@ -145,8 +144,11 @@ fn main() {
                     RK::Dump(dump) => {
                         println!("{}:[DUMP] {:?}", tag, dump);
                     }
-                    RK::OutputNotify(Ok(outhash)) => {
-                        println!("{}:=>{}", tag, outhash);
+                    RK::OutputNotify(Ok(outputs)) => {
+                        println!("{}:=>", tag);
+                        for (key, outhash) in outputs {
+                            println!("\t{}->{} {:?}", key, outhash, outhash.0);
+                        }
                     }
                     RK::OutputNotify(Err(oe)) => {
                         println!("{}:[ERROR] {:?}", tag, oe);
@@ -175,7 +177,7 @@ fn main() {
             });
         }
 
-        let schedule_cmd = proto::ControlCommand::Schedule {
+        let schedule_cmd = ControlCommand::Schedule {
             graph,
             attach_to_logs: !scmd.is_present("no-attach-to-logs-for-graph"),
         };
@@ -188,7 +190,7 @@ fn main() {
 
         stream
             .write_all(
-                &proto::Length::try_from(cmd_ser.len())
+                &yzix_core::Length::try_from(cmd_ser.len())
                     .expect("unable to serialize command length (graph too big?)")
                     .to_le_bytes(),
             )
@@ -197,19 +199,18 @@ fn main() {
             .write_all(&cmd_ser[..])
             .expect("unable to push schedule to server");
 
-        let mut buf = [0u8; std::mem::size_of::<proto::Length>()];
+        let mut buf = [0u8; std::mem::size_of::<yzix_core::Length>()];
         let mut dat = Vec::new();
         let mut stream = std::io::BufReader::new(stream);
         while stream.read_exact(&mut buf).is_ok() {
-            let len: usize = proto::Length::from_le_bytes(buf)
+            let len: usize = yzix_core::Length::from_le_bytes(buf)
                 .try_into()
                 .expect("unable to deserialize response length");
             dat.resize(len, 0);
             stream.read_exact(&mut dat).expect("read failed");
-            let resp: proto::Response =
+            let resp: Response =
                 ciborium::de::from_reader(&dat[..]).expect("unable to deserialize response");
 
-            use proto::ResponseKind as RK;
             let tag = resp.tag;
             match resp.kind {
                 RK::LogLine { bldname, content } => {
@@ -221,8 +222,11 @@ fn main() {
                 RK::Dump(dump) => {
                     println!("{}:[DUMP] {:?}", tag, dump);
                 }
-                RK::OutputNotify(Ok(outhash)) => {
-                    println!("{}:=>{} {:?}", tag, outhash, outhash.0);
+                RK::OutputNotify(Ok(outputs)) => {
+                    println!("{}:=>", tag);
+                    for (key, outhash) in outputs {
+                        println!("\t{}->{} {:?}", key, outhash, outhash.0);
+                    }
                 }
                 RK::OutputNotify(Err(oe)) => {
                     println!("{}:[ERROR] {:?}", tag, oe);

@@ -1,5 +1,5 @@
 use super::*;
-use crate::{store::Dump, OutputError, Utf8Path};
+use crate::{store::Dump, OutputError, OutputName, Utf8Path};
 
 pub trait ReadOutHash {
     fn read_out_hash(&self, output: &str) -> Option<StoreHash>;
@@ -7,7 +7,7 @@ pub trait ReadOutHash {
 
 #[cfg(test)]
 impl ReadOutHash for () {
-    fn read_out_hash(&self, output: &str) -> Option<StoreHash> {
+    fn read_out_hash(&self, _: &str) -> Option<StoreHash> {
         None
     }
 }
@@ -36,7 +36,7 @@ fn eval_pattern(
     Ok(ret)
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub enum WorkItem {
     /// node name is intentionally not present here,
     /// as it is irrelevant for execution and hashing
@@ -45,7 +45,7 @@ pub enum WorkItem {
         envs: HashMap<String, String>,
         new_root: Option<StoreHash>,
         /// invariant: `!outputs.is_empty()`
-        outputs: HashSet<String>,
+        outputs: HashSet<OutputName>,
     },
     UnDump {
         dat: Arc<Dump>,
@@ -73,7 +73,7 @@ impl WorkItem {
             // and because they are shortcuts, they are fast to check/execute on the server
             // so we don't want to check input-addressing for them.
             WI::Require(_) | WI::Eval(_) | WI::Dump { .. } => None,
-            _ => Some(StoreHash::hash_complex(self))
+            _ => Some(StoreHash::hash_complex(self)),
         }
     }
 
@@ -87,7 +87,7 @@ impl WorkItem {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, PartialEq, thiserror::Error)]
 pub enum EvalError {
     /// This error is returned when [`read_out_hash`](ReadOutHash::read_out_hash) returns `None`.
     /// It allows consuming code to find out which input isn't available,
@@ -136,13 +136,19 @@ impl<T: ReadOutHash> Graph<T> {
         use NodeKind as NK;
 
         Ok(match &self.0[nid].kind {
-            NK::Run { command, envs, outputs } => {
+            NK::Run {
+                command,
+                envs,
+                outputs,
+            } => {
                 let args = match command
                     .iter()
                     .map(|i| eval_pattern(store_path, &rphs, i))
                     .collect::<Result<Vec<_>, _>>()
                 {
-                    Err(e) => return Err(OutputError::InputNotFound(EdgeKind::Placeholder(e)).into()),
+                    Err(e) => {
+                        return Err(OutputError::InputNotFound(EdgeKind::Placeholder(e)).into())
+                    }
                     Ok(x) if x.is_empty() => return Err(OutputError::EmptyCommand.into()),
                     Ok(x) => x,
                 };
@@ -153,12 +159,14 @@ impl<T: ReadOutHash> Graph<T> {
                     .collect::<Result<HashMap<_, _>, _>>()
                 {
                     Ok(x) => x,
-                    Err(e) => return Err(OutputError::InputNotFound(EdgeKind::Placeholder(e)).into()),
+                    Err(e) => {
+                        return Err(OutputError::InputNotFound(EdgeKind::Placeholder(e)).into())
+                    }
                 };
 
                 let outputs = if outputs.is_empty() {
                     let mut tmp = HashSet::default();
-                    tmp.insert(super::default_output());
+                    tmp.insert(OutputName::default());
                     tmp
                 } else {
                     outputs.clone()
@@ -173,11 +181,12 @@ impl<T: ReadOutHash> Graph<T> {
             }
             NK::UnDump { dat } => {
                 let hash = StoreHash::hash_complex(&*dat);
-                WorkItem::UnDump { dat: dat.clone(), hash }
+                WorkItem::UnDump {
+                    dat: dat.clone(),
+                    hash,
+                }
             }
-            NK::Require { hash } => {
-                WorkItem::Require(*hash)
-            }
+            NK::Require { hash } => WorkItem::Require(*hash),
             NK::Dump => WorkItem::Dump(rphs),
 
             NK::Fetch { url, hash } => {
@@ -229,7 +238,7 @@ mod tests {
             },
         });
         let mut outputs = HashSet::new();
-        outputs.insert("out".to_string());
+        outputs.insert(OutputName::default());
         let b = g.0.add_node(Node {
             name: "std".to_string(),
             logtag: 0,
@@ -240,9 +249,14 @@ mod tests {
                 outputs,
             },
         });
-        let a_ = g.eval_node(a, b"");
-        assert_eq!(a_, g.eval_node(b, b""));
-        assert!(a_.inputs_hash(), Some(StoreHash([0u8; 32])));
-        assert!(a_.inputs_hash(), Some(StoreHash([0u8; 32])));
+        let a_ = g.eval_node(a, Utf8Path::new(""));
+        assert_eq!(a_, g.eval_node(b, Utf8Path::new("")));
+        assert_eq!(
+            a_.unwrap().inputs_hash(),
+            Some(StoreHash([
+                192, 60, 81, 233, 169, 109, 32, 73, 146, 118, 94, 219, 221, 4, 96, 6, 231, 239, 65,
+                182, 233, 207, 250, 178, 162, 192, 195, 32, 153, 92, 154, 77
+            ]))
+        );
     }
 }

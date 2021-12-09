@@ -8,6 +8,8 @@
 
 pub mod build_graph;
 pub mod store;
+mod strwrappers;
+pub use crate::strwrappers::OutputName;
 
 pub use camino::{Utf8Path, Utf8PathBuf};
 pub use ciborium;
@@ -18,6 +20,7 @@ use crate::{
     store::{Dump, Hash as StoreHash},
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 pub type Length = u64;
 
@@ -58,7 +61,7 @@ pub struct Response {
 pub enum ResponseKind {
     LogLine { bldname: String, content: String },
     Dump(Dump),
-    OutputNotify(Result<StoreHash, OutputError>),
+    OutputNotify(Result<HashMap<OutputName, StoreHash>, OutputError>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, thiserror::Error)]

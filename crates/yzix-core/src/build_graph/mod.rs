@@ -1,4 +1,4 @@
-use crate::store::Hash as StoreHash;
+use crate::{store::Hash as StoreHash, OutputName};
 pub use petgraph::stable_graph::{NodeIndex, StableGraph as RawGraph};
 pub use petgraph::{visit::EdgeRef, Direction};
 use serde::{Deserialize, Serialize};
@@ -40,7 +40,7 @@ pub enum NodeKind {
 
         /// default is just the output "out", equivalent to an empty set
         #[serde(default, skip_serializing_if = "HashSet::is_empty")]
-        outputs: HashSet<String>,
+        outputs: HashSet<OutputName>,
     },
 
     /// this is necessary to just let the client download stuff,
@@ -124,8 +124,8 @@ pub struct Edge {
     /// should be referenced.
     /// NOTE: this makes it necessary to use a graph struct which is
     /// capable of representing multiple edges between the same two nodes.
-    #[serde(default = "default_output", skip_serializing_if = "is_default_output")]
-    pub sel_output: String,
+    #[serde(default, skip_serializing_if = "crate::strwrappers::is_default_output")]
+    pub sel_output: OutputName,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -136,16 +136,6 @@ pub enum EdgeKind {
     /// this changes the build environment to make / read-only,
     /// and cwd from / to /tmp (the expected output stays ./out)
     Root,
-}
-
-#[inline]
-pub fn default_output() -> String {
-    "out".to_string()
-}
-
-#[inline]
-fn is_default_output(s: &impl AsRef<str>) -> bool {
-    s.as_ref() == "out"
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

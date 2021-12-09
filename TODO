@@ -1,6 +1,6 @@
 besides the stuff mentioned in comments throughout the code,
 a few things would be nice to have or somewhat important:
-- dump <- input-hash association signatures (realizations)
+- dump <- input-hash association *signatures*
 - maybe more restricted containerization?
 - build server cluster support (distcc-like)
 - maybe parse ninja files, and the split compile-build-rules

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use yzix_core::ciborium;
-use yzix_core::proto::{self, Response};
+use yzix_core::{ControlCommand, Length as ProtoLength, Response};
 
 pub async fn handle_client_io(
     mains: Sender<MainMessage>,
@@ -24,18 +24,18 @@ pub async fn handle_client_io(
     // handle input
     tokio::join!(
         async move {
-            let mut lenbuf = [0u8; std::mem::size_of::<proto::Length>()];
+            let mut lenbuf = [0u8; std::mem::size_of::<ProtoLength>()];
             let mut buf: Vec<u8> = Vec::new();
             let mut stream = tokio::io::BufReader::new(stream);
             while stream.read_exact(&mut lenbuf).await.is_ok() {
                 buf.clear();
-                let len = proto::Length::from_le_bytes(lenbuf);
+                let len = ProtoLength::from_le_bytes(lenbuf);
                 // TODO: make sure that the length isn't too big
                 buf.resize(len.try_into().unwrap(), 0);
                 if stream.read_exact(&mut buf[..]).await.is_err() {
                     break;
                 }
-                use proto::ControlCommand as C;
+                use ControlCommand as C;
                 let cmd: C = match ciborium::de::from_reader(&buf[..]) {
                     Ok(x) => x,
                     Err(e) => {
@@ -100,7 +100,7 @@ pub async fn handle_client_io(
                         }
                     } else {
                         if stream2
-                            .write_all(&proto::Length::to_le_bytes(buf.len().try_into().unwrap()))
+                            .write_all(&ProtoLength::to_le_bytes(buf.len().try_into().unwrap()))
                             .await
                             .is_err()
                         {
@@ -134,11 +134,11 @@ pub async fn handle_clients_initial(
         };
 
         // auth + options
-        let mut lenbuf = [0u8; std::mem::size_of::<proto::Length>()];
+        let mut lenbuf = [0u8; std::mem::size_of::<ProtoLength>()];
         if stream.read_exact(&mut lenbuf).await.is_err() {
             continue;
         }
-        let len = proto::Length::from_le_bytes(lenbuf);
+        let len = ProtoLength::from_le_bytes(lenbuf);
         if len >= 0x400 {
             continue;
         }
@@ -147,7 +147,7 @@ pub async fn handle_clients_initial(
         if stream.read_exact(&mut buf[..]).await.is_err() {
             continue;
         }
-        let opts: proto::ClientOpts = match ciborium::de::from_reader(&buf[..]) {
+        let opts: yzix_core::ClientOpts = match ciborium::de::from_reader(&buf[..]) {
             Ok(x) => x,
             Err(_) => continue,
         };

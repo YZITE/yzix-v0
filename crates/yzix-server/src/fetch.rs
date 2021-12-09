@@ -3,10 +3,8 @@ use async_channel::{unbounded, Receiver, Sender};
 use futures_util::future::FutureExt;
 use reqwest::Client;
 use std::future::Future;
-use yzix_core::{
-    proto::OutputError,
-    store::{Dump, Hash as StoreHash},
-};
+use yzix_core::store::{Dump, Hash as StoreHash};
+use yzix_core::OutputError;
 
 #[derive(Clone)]
 pub struct ConnPool {
@@ -74,9 +72,9 @@ pub async fn mangle_result(
         }
     }
 
-    Ok(BuiltItem {
-        inhash: None,
-        dump: Some(std::sync::Arc::new(dump)),
+    Ok(BuiltItem::with_single(
+        None,
+        Some(std::sync::Arc::new(dump)),
         outhash,
-    })
+    ))
 }
