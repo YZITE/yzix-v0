@@ -1,5 +1,19 @@
+
+curl -O https://bouncer.gentoo.org/fetch/root/all/releases/amd64/autobuilds/latest-stage3-amd64-musl.txt
+
+STAGE3_URL="$(< latest-stage3-amd64-musl.txt)"
+
+cat > graph.json <<EOF
 {
   "nodes": [
+    {
+      "name": "gentoo-stage3.tar.xz",
+      "kind": {
+        "type": "fetch",
+        "url": "$"
+      },
+      "logtag": 1,
+    }
     {
       "name": "alpine-reduce-rq",
       "kind": {
@@ -98,3 +112,4 @@
     ]
   ]
 }
+EOF

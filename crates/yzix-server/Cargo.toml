@@ -31,7 +31,7 @@ version = "1.7"
 features = ["union"]
 
 [dependencies.tokio]
-version = "1"
+version = "1.14"
 features = ["macros", "net", "rt", "rt-multi-thread", "signal", "sync"]
 
 [dependencies.yzix-core]
