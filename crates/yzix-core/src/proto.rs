@@ -75,6 +75,7 @@ pub enum OutputError {
     #[error("hash collision at {0}")]
     HashCollision(StoreHash),
 
+    /// this is used when a hash was set as `required`, but wasn't available
     #[error("expected file to be available, but expectation wasn't met")]
     Unavailable,
 
