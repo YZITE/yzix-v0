@@ -40,9 +40,12 @@ pub enum NodeKind {
     /// to suppot some distcc-like workflow
     UnDump { dat: Arc<crate::store::Dump> },
 
-    /// a kind of fixed-output derivation, used to avoid
+    /// a kind of potential fixed-output derivation, used to avoid
     /// additional round-trips between client and server
-    Fetch { url: url::Url, hash: StoreHash },
+    Fetch {
+        url: url::Url,
+        hash: Option<StoreHash>,
+    },
 
     /// to avoid the need to always upload huge amount of data,
     /// use this to require a store path to be already present.
@@ -155,10 +158,14 @@ impl<T> Graph<T> {
                 hasher.update([0]);
             }
             NodeKind::Fetch { url, hash } => {
-                hasher.update(b"fetch\0");
-                hasher.update(url.as_str());
-                hasher.update([0]);
-                hasher.update(hash);
+                if let Some(hash) = hash {
+                    hasher.update(b"fetch\0");
+                    hasher.update(url.as_str());
+                    hasher.update([0]);
+                    hasher.update(hash);
+                } else {
+                    return None;
+                }
             }
             NodeKind::Require { .. } | NodeKind::Eval | NodeKind::Dump { .. } => {
                 return None;

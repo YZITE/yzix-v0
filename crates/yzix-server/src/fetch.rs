@@ -1,3 +1,4 @@
+use crate::BuiltItem;
 use async_channel::{unbounded, Receiver, Sender};
 use futures_util::future::FutureExt;
 use reqwest::Client;
@@ -40,8 +41,8 @@ impl ConnPool {
 pub async fn mangle_result(
     url: yzix_core::Url,
     r: Result<reqwest::Response, reqwest::Error>,
-    expect_hash: StoreHash,
-) -> Result<Dump, OutputError> {
+    expect_hash: Option<StoreHash>,
+) -> Result<BuiltItem, OutputError> {
     let r = r?;
     let rstat = r.status();
 
@@ -61,14 +62,21 @@ pub async fn mangle_result(
         executable: false,
     };
 
-    // verify hash
-    let hash = StoreHash::hash_complex(&dump);
-    if expect_hash != hash {
-        return Err(OutputError::HashMismatch {
-            expected: expect_hash,
-            got: hash,
-        });
+    let outhash = StoreHash::hash_complex(&dump);
+
+    if let Some(expect_hash) = expect_hash {
+        // verify hash
+        if expect_hash != outhash {
+            return Err(OutputError::HashMismatch {
+                expected: expect_hash,
+                got: outhash,
+            });
+        }
     }
 
-    Ok(dump)
+    Ok(BuiltItem {
+        inhash: None,
+        dump: Some(std::sync::Arc::new(dump)),
+        outhash,
+    })
 }

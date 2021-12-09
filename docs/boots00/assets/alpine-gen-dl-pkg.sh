@@ -1,19 +1,16 @@
+# USGAE: ROOTFS=/path/to/alpine ./agdlpkg.sh APKINDEX_UNPACKED PKG_NAME
+
+[ $# -eq 2 ] || exit 1
+
+grep -C 
+
 {
   "nodes": [
     {
       "name": "alpine-reduce-rq",
       "kind": {
-        "type": "require",
-        "hash": [105, 46, 37, 95, 23, 233, 10, 101, 31, 164, 226, 200, 222, 182, 201, 48, 45, 37, 99, 32, 63, 210, 226, 3, 192, 110, 112, 197, 85, 118, 152, 113]
-      },
-      "logtag": 0,
-      "rest": null
-    },
-    {
-      "name": "alpine-APKINDEX.tar.gz",
-      "kind": {
-        "type": "require",
-        "hash": [47, 52, 161, 219, 174, 4, 239, 10, 5, 48, 253, 106, 7, 218, 133, 254, 66, 119, 135, 37, 111, 132, 118, 221, 49, 29, 91, 194, 237, 130, 30, 163]
+        "type": "fetch",
+        "hash": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
       },
       "logtag": 0,
       "rest": null
@@ -50,33 +47,7 @@
         ],
         "envs": {}
       },
-      "logtag": 1,
-      "rest": null
-    },
-    {
-      "name": "alpine-dl",
-      "kind": {
-        "type": "run",
-        "command": [
-          [
-            {
-              "String": "/bin/busybox"
-            }
-          ],
-          [
-            {
-              "String": "sh"
-            }
-          ],
-          [
-            {
-              "Placeholder": "reduce"
-            }
-          ]
-        ],
-        "envs": {}
-      },
-      "logtag": 1,
+      "logtag": 3,
       "rest": null
     }
   ],

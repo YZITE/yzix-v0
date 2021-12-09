@@ -1,30 +1,32 @@
 use crate::{AttachLogsKind, MainMessage};
 use async_channel::{Receiver, Sender};
-use futures_util::{future::join, AsyncReadExt, AsyncWriteExt};
 use std::collections::HashSet;
-use std::{future::Future, sync::Arc};
+use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use yzix_core::ciborium;
 use yzix_core::proto::{self, Response};
 
-pub fn handle_client_io(
-    mains: &Sender<MainMessage>,
-    stream: async_net::TcpStream,
+pub async fn handle_client_io(
+    mains: Sender<MainMessage>,
+    mut stream: TcpStream,
     attach_logs: Option<(Arc<str>, Receiver<Arc<Response>>)>,
-) -> impl Future<Output = ((), ())> {
+) {
     let mainsi = mains.clone();
-    let mainso = mains.clone();
-    let mut stream2 = stream.clone();
+    let mainso = mains;
     let (attach_logs_bearer_token, logr) = match attach_logs {
         Some((x, y)) => (Some(x), Some(y)),
         None => (None, None),
     };
 
+    let (stream, mut stream2) = stream.split();
+
     // handle input
-    join(
+    tokio::join!(
         async move {
             let mut lenbuf = [0u8; std::mem::size_of::<proto::Length>()];
             let mut buf: Vec<u8> = Vec::new();
-            let mut stream = futures_util::io::BufReader::new(stream);
+            let mut stream = tokio::io::BufReader::new(stream);
             while stream.read_exact(&mut lenbuf).await.is_ok() {
                 buf.clear();
                 let len = proto::Length::from_le_bytes(lenbuf);
@@ -114,15 +116,23 @@ pub fn handle_client_io(
                 }
             }
         },
-    )
+    );
 }
 
 pub async fn handle_clients_initial(
     mains: Sender<MainMessage>,
-    listener: async_net::TcpListener,
+    listener: TcpListener,
     valid_bearer_tokens: HashSet<String>,
 ) {
-    while let Ok((mut stream, _)) = listener.accept().await {
+    loop {
+        let mut stream = match listener.accept().await {
+            Ok((x, _)) => x,
+            Err(e) => {
+                eprintln!("clients listener error: {}", e);
+                continue;
+            }
+        };
+
         // auth + options
         let mut lenbuf = [0u8; std::mem::size_of::<proto::Length>()];
         if stream.read_exact(&mut lenbuf).await.is_err() {

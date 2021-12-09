@@ -7,7 +7,6 @@
 )]
 
 use async_channel::{unbounded, Sender};
-use async_lock::Semaphore;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -66,7 +65,7 @@ impl build_graph::ReadOutHash for NodeMeta {
 
 pub enum MainMessage {
     ClientConn {
-        conn: async_net::TcpStream,
+        conn: tokio::net::TcpStream,
         opts: proto::ClientOpts,
     },
     Schedule {
@@ -204,14 +203,17 @@ fn try_make_work_intern(
 
         NK::Fetch { url, hash } => {
             if let Some(x) = expect_hash {
-                if x != *hash {
-                    return Some(Err(OutputError::HashMismatch {
-                        expected: x,
-                        got: *hash,
-                    }));
+                if let &Some(y) = hash {
+                    if x != y {
+                        return Some(Err(OutputError::HashMismatch {
+                            expected: x,
+                            got: y,
+                        }));
+                    }
                 }
+            } else {
+                expect_hash = hash.as_ref().copied();
             }
-            expect_hash = Some(*hash);
             // this is also what's checked by reqwest::IntoUrl
             if !url.has_host() {
                 return Some(Err(OutputError::InvalidUrl(url.clone())));
@@ -232,7 +234,7 @@ fn try_make_work_intern(
 async fn schedule(
     config: Arc<ServerConfig>,
     mains: Sender<MainMessage>,
-    jobsem: Arc<Semaphore>,
+    jobsem: Arc<tokio::sync::Semaphore>,
     connpool: FetchConnPool,
     graph: &mut build_graph::Graph<NodeMeta>,
     nid: NodeIndex,
@@ -339,14 +341,21 @@ async fn schedule(
             kind: WorkItemKind::Fetch(url),
             expect_hash,
         }) => {
-            let expect_hash = expect_hash.unwrap();
+            let mut det = None;
 
-            if std::path::Path::new(&config.store_path.join(expect_hash.to_string())).is_file() {
-                Ok(BuiltItem {
-                    inhash: None,
-                    dump: None,
-                    outhash: expect_hash,
-                })
+            if let Some(expect_hash) = expect_hash {
+                if std::path::Path::new(&config.store_path.join(expect_hash.to_string())).is_file()
+                {
+                    det = Some(Ok(BuiltItem {
+                        inhash: None,
+                        dump: None,
+                        outhash: expect_hash,
+                    }));
+                }
+            }
+
+            if let Some(det) = det {
+                det
             } else {
                 let connpool = connpool.clone();
                 tokio::spawn(async move {
@@ -356,13 +365,7 @@ async fn schedule(
                     let _ = mains
                         .send(MainMessage::Done {
                             nid,
-                            det: mangle_fetch_result(url, resp, expect_hash)
-                                .await
-                                .map(|dump| BuiltItem {
-                                    inhash: None,
-                                    dump: Some(Arc::new(dump)),
-                                    outhash: expect_hash,
-                                }),
+                            det: mangle_fetch_result(url, resp, expect_hash).await,
                         })
                         .await;
                 });
@@ -479,7 +482,7 @@ async fn main() {
     std::fs::create_dir_all(&config.store_path).expect("unable to create store dir");
 
     let cpucnt = num_cpus::get();
-    let jobsem = Arc::new(Semaphore::new(cpucnt));
+    let jobsem = Arc::new(tokio::sync::Semaphore::new(cpucnt));
 
     // setup fetch connection pool
     let connpool = FetchConnPool::default();
@@ -502,7 +505,7 @@ async fn main() {
         }
     }
 
-    let listener = async_net::TcpListener::bind(&config.socket_bind)
+    let listener = tokio::net::TcpListener::bind(&config.socket_bind)
         .await
         .unwrap();
 
@@ -518,7 +521,7 @@ async fn main() {
     let mains2 = mains.clone();
     tokio::spawn(async move {
         // wait for shutdown signal
-        async_ctrlc::CtrlC::new().unwrap().await;
+        tokio::signal::ctrl_c().await.unwrap();
         let _ = mains2.send(MainMessage::Shutdown).await;
     });
 
@@ -557,7 +560,7 @@ async fn main() {
             MM::Log(logline) => println!("{}", logline),
             MM::ClientConn { conn, opts } => {
                 tokio::spawn(handle_client_io(
-                    &mains,
+                    mains.clone(),
                     conn,
                     if opts.attach_to_logs {
                         let (logs, logr) = unbounded();
