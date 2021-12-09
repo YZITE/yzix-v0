@@ -1,3 +1,4 @@
+use crate::OutputError;
 use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
 use std::{convert, fmt, fs};
@@ -56,6 +57,17 @@ impl Hash {
         ciborium::ser::into_writer(x, &mut ser).unwrap();
         hasher.update(ser);
         Self::finalize_hasher(hasher)
+    }
+
+    pub fn verify(&self, expected: &Hash) -> Result<(), OutputError> {
+        if self == expected {
+            Ok(())
+        } else {
+            Err(OutputError::HashMismatch {
+                expected: *expected,
+                got: *self,
+            })
+        }
     }
 }
 

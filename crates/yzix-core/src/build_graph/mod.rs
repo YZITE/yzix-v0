@@ -2,7 +2,11 @@ use crate::store::Hash as StoreHash;
 pub use petgraph::stable_graph::{NodeIndex, StableGraph as RawGraph};
 pub use petgraph::{visit::EdgeRef, Direction};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+mod eval;
+pub use eval::*;
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub enum CmdArgSnip {
@@ -31,7 +35,12 @@ pub enum NodeKind {
         /// to make it possible to properly use placeholders
         command: Vec<Vec<CmdArgSnip>>,
 
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         envs: HashMap<String, Vec<CmdArgSnip>>,
+
+        /// default is just the output "out", equivalent to an empty set
+        #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+        outputs: HashSet<String>,
     },
 
     /// this is necessary to just let the client download stuff,
@@ -44,6 +53,8 @@ pub enum NodeKind {
     /// additional round-trips between client and server
     Fetch {
         url: url::Url,
+
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         hash: Option<StoreHash>,
     },
 
@@ -60,6 +71,11 @@ pub enum NodeKind {
     /// top-level, which is a directory
     // TODO: maybe add a node kind to dump stuff into a S3 bucket.
     Dump,
+
+    /// instead of allowing loops, we instead insert this node
+    /// which describes basically an "dynamic expect_hash",
+    /// e.g. make sure that the output hash of all inputs is equal.
+    AssertEqual,
 }
 
 impl<T, U> std::cmp::PartialEq<Node<U>> for Node<T> {
@@ -101,14 +117,20 @@ impl<T> Node<T> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub enum Edge {
-    Placeholder(String),
+pub struct Edge {
+    pub kind: EdgeKind,
 
-    /// instead of allowing loops, we instead insert this edge
-    /// which describes basically an "dynamic expect_hash",
-    /// e.g. make sure that the output hash is equal to the
-    /// output hash of another derivation/node
-    AssertEqual,
+    /// denotes which output (if the input node has multiple outputs)
+    /// should be referenced.
+    /// NOTE: this makes it necessary to use a graph struct which is
+    /// capable of representing multiple edges between the same two nodes.
+    #[serde(default = "default_output", skip_serializing_if = "is_default_output")]
+    pub sel_output: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub enum EdgeKind {
+    Placeholder(String),
 
     /// specify an alternative root directory.
     /// this changes the build environment to make / read-only,
@@ -116,95 +138,27 @@ pub enum Edge {
     Root,
 }
 
-pub trait ReadOutHash {
-    fn read_out_hash(&self) -> Option<StoreHash>;
+#[inline]
+pub fn default_output() -> String {
+    "out".to_string()
+}
+
+#[inline]
+fn is_default_output(s: &impl AsRef<str>) -> bool {
+    s.as_ref() == "out"
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Graph<T>(pub RawGraph<Node<T>, Edge>);
 
 impl<T> Default for Graph<T> {
+    #[inline]
     fn default() -> Self {
         Self(Default::default())
     }
 }
 
 impl<T> Graph<T> {
-    pub fn hash_node_inputs(&self, nid: NodeIndex, seed: &[u8]) -> Option<StoreHash>
-    where
-        T: ReadOutHash,
-    {
-        // NOTE: we intentionally don't hash the node name
-        use blake2::digest::Update;
-        use ciborium::ser::into_writer as cbor_write;
-        let node = self.0.node_weight(nid)?;
-        let mut hasher = StoreHash::get_hasher();
-        let mut tmp_ser = Vec::new();
-        hasher.update(seed);
-        match &node.kind {
-            NodeKind::Run { command, envs } => {
-                hasher.update(b"run\0");
-                cbor_write(command, &mut tmp_ser).unwrap();
-                hasher.update(&tmp_ser);
-                hasher.update(b"\0envs\0");
-                cbor_write(envs, &mut tmp_ser).unwrap();
-                hasher.update(&tmp_ser);
-                hasher.update([0]);
-            }
-            NodeKind::UnDump { dat } => {
-                hasher.update(b"undump\0");
-                cbor_write(dat, &mut tmp_ser).unwrap();
-                hasher.update(&tmp_ser);
-                hasher.update([0]);
-            }
-            NodeKind::Fetch { url, hash } => {
-                if let Some(hash) = hash {
-                    hasher.update(b"fetch\0");
-                    hasher.update(url.as_str());
-                    hasher.update([0]);
-                    hasher.update(hash);
-                } else {
-                    return None;
-                }
-            }
-            NodeKind::Require { .. } | NodeKind::Eval | NodeKind::Dump { .. } => {
-                return None;
-            }
-        }
-        let _ = tmp_ser;
-
-        for i in self.0.edges(nid) {
-            match i.weight() {
-                Edge::Placeholder(plh) => {
-                    hasher.update(&*plh);
-                    hasher.update([0]);
-                    hasher.update(
-                        self.0
-                            .node_weight(i.target())
-                            .unwrap()
-                            .rest
-                            .read_out_hash()?,
-                    );
-                    hasher.update([0]);
-                }
-                Edge::Root => {
-                    hasher.update("\0{root}\0");
-                    hasher.update(
-                        self.0
-                            .node_weight(i.target())
-                            .unwrap()
-                            .rest
-                            .read_out_hash()?,
-                    );
-                    hasher.update([0]);
-                }
-                _ => {}
-            }
-        }
-
-        Some(StoreHash::finalize_hasher(hasher))
-    }
-
     /// replace all references to a node with another one;
     /// used e.g. to merge identical nodes
     pub fn replace_node(&mut self, from: NodeIndex, to: NodeIndex) -> Option<Node<T>> {
