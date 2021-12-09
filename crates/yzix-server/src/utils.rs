@@ -1,7 +1,11 @@
 use crate::{BuiltItem, LogFwdMessage, NodeMeta, WorkItemRun};
 use async_channel::Sender;
 use async_process::Command;
-use futures_lite::{future::zip, io as flio};
+use futures_util::{
+    future::join,
+    io::{AsyncBufReadExt, AsyncRead, BufReader},
+    stream::StreamExt,
+};
 use std::collections::{HashMap, HashSet};
 use std::{future::Future, marker::Unpin, path::Path, sync::Arc};
 use yzix_core::build_graph::{self, NodeIndex};
@@ -13,7 +17,6 @@ pub async fn log_to_bunch<T: Clone>(subs: &mut smallvec::SmallVec<[Sender<T>; 1]
     let mut cnt = 0usize;
     let mut bs = bit_set::BitSet::with_capacity(subs.len());
     {
-        use futures_lite::stream::StreamExt;
         let mut cont: futures_util::stream::FuturesOrdered<_> =
             subs.iter().map(|li| li.send(msg.clone())).collect();
         while let Some(suc) = cont.next().await {
@@ -46,18 +49,14 @@ pub fn push_response(
     )
 }
 
-async fn handle_logging<T: flio::AsyncRead + Unpin, U: flio::AsyncRead + Unpin>(
+async fn handle_logging<T: AsyncRead + Unpin>(
     tag: u64,
-    bldname: String,
+    bldname: &str,
     mut log: smallvec::SmallVec<[Sender<LogFwdMessage>; 1]>,
-    pipe1: T,
-    pipe2: U,
+    pipe: T,
 ) {
-    use futures_lite::{io::AsyncBufReadExt, stream::StreamExt};
-    let mut stream1 = flio::BufReader::new(pipe1).lines();
-    let mut stream2 = flio::BufReader::new(pipe2).lines();
-    // FIXME: refactor into channel-forwarding, because `or` sometimes looses data
-    while let Some(content) = futures_lite::future::or(stream1.next(), stream2.next()).await {
+    let mut stream = BufReader::new(pipe).lines();
+    while let Some(content) = stream.next().await {
         let content = match content {
             Ok(x) => x,
             // TODO: give the client a proper error serialization
@@ -69,7 +68,7 @@ async fn handle_logging<T: flio::AsyncRead + Unpin, U: flio::AsyncRead + Unpin>(
                 tag,
                 kind: ResponseKind::LogLine {
                     bldname: bldname.to_string(),
-                    content: content.clone(),
+                    content,
                 },
             })),
         )
@@ -235,20 +234,19 @@ pub async fn handle_process(
         .stderr(Stdio::piped())
         .current_dir(workdir.path())
         .spawn()?;
-    let x = handle_logging(
-        tag,
-        bldname,
-        log,
-        ch.stdout.take().unwrap(),
-        ch.stderr.take().unwrap(),
-    );
-    let exs = zip(x, ch.status()).await.1?;
+    let x = handle_logging(tag, &bldname, log.clone(), ch.stdout.take().unwrap());
+    let y = handle_logging(tag, &bldname, log, ch.stderr.take().unwrap());
+
+    let exs = join(join(x, y), ch.status()).await.1?;
     if exs.success() {
         let dump = Dump::read_from_path(&rootdir.join("out"))?;
         let hash = StoreHash::hash_complex(&dump);
         if let Some(expect_hash) = expect_hash {
             if hash != expect_hash {
-                return Err(OutputError::HashMismatch(expect_hash, hash));
+                return Err(OutputError::HashMismatch {
+                    expected: expect_hash,
+                    got: hash,
+                });
             }
         }
         Ok(BuiltItem {
@@ -296,13 +294,11 @@ pub fn read_graph_from_store(
     store_path: &Utf8Path,
     outhash: StoreHash,
 ) -> Result<build_graph::Graph<()>, OutputError> {
-    let dat = std::fs::read_to_string(store_path.join(outhash.to_string()).as_std_path())?;
-    match serde_json::from_str(&dat) {
-        Ok(x) => Ok(x),
-        Err(e) => Err(OutputError::JsonDeserialize {
-            line: e.line().try_into()?,
-            column: e.column().try_into()?,
-            typ: format!("{:?}", e.classify()),
-        }),
-    }
+    let real_path = store_path.join(outhash.to_string()).into_std_path_buf();
+    Ok(serde_json::from_str(
+        &std::fs::read_to_string(&real_path).map_err(|e| yzix_core::store::Error {
+            real_path,
+            kind: e.into(),
+        })?,
+    )?)
 }

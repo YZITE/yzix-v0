@@ -12,3 +12,4 @@ pub mod store;
 
 pub use camino::{Utf8Path, Utf8PathBuf};
 pub use ciborium;
+pub use url::Url;

@@ -1,6 +1,6 @@
 use crate::{AttachLogsKind, MainMessage};
 use async_channel::{Receiver, Sender};
-use futures_lite::{future::zip, io as flio, AsyncReadExt, AsyncWriteExt};
+use futures_util::{future::join, AsyncReadExt, AsyncWriteExt};
 use std::collections::HashSet;
 use std::{future::Future, sync::Arc};
 use yzix_core::ciborium;
@@ -20,11 +20,11 @@ pub fn handle_client_io(
     };
 
     // handle input
-    zip(
+    join(
         async move {
             let mut lenbuf = [0u8; std::mem::size_of::<proto::Length>()];
             let mut buf: Vec<u8> = Vec::new();
-            let mut stream = flio::BufReader::new(stream);
+            let mut stream = futures_util::io::BufReader::new(stream);
             while stream.read_exact(&mut lenbuf).await.is_ok() {
                 buf.clear();
                 let len = proto::Length::from_le_bytes(lenbuf);

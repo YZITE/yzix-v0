@@ -11,7 +11,6 @@ use async_lock::Semaphore;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use yz_server_executor::Executor;
 use yzix_core::build_graph::{self, Direction, EdgeRef, NodeIndex};
 use yzix_core::proto::{self, OutputError, Response, ResponseKind};
 use yzix_core::store::{Dump, Hash as StoreHash};
@@ -19,6 +18,8 @@ use yzix_core::{Utf8Path, Utf8PathBuf};
 
 mod clients;
 use clients::{handle_client_io, handle_clients_initial};
+mod fetch;
+use fetch::{mangle_result as mangle_fetch_result, ConnPool as FetchConnPool};
 mod utils;
 use utils::*;
 
@@ -102,6 +103,7 @@ enum WorkItemKind {
     Run(WorkItemRun),
     UnDump(Arc<Dump>),
     Require(StoreHash),
+    Fetch(yzix_core::Url),
     Eval(StoreHash),
     Dump(HashMap<String, StoreHash>),
 }
@@ -139,7 +141,10 @@ fn try_make_work_intern(
                 Edge::AssertEqual => {
                     if let Some(x) = expect_hash {
                         if x != h {
-                            return Some(Err(OutputError::HashMismatch(x, h)));
+                            return Some(Err(OutputError::HashMismatch {
+                                expected: x,
+                                got: h,
+                            }));
                         }
                     } else {
                         expect_hash = Some(h);
@@ -197,6 +202,23 @@ fn try_make_work_intern(
         NK::Require { hash } => WorkItemKind::Require(*hash),
         NK::Dump => WorkItemKind::Dump(rphs),
 
+        NK::Fetch { url, hash } => {
+            if let Some(x) = expect_hash {
+                if x != *hash {
+                    return Some(Err(OutputError::HashMismatch {
+                        expected: x,
+                        got: *hash,
+                    }));
+                }
+            }
+            expect_hash = Some(*hash);
+            // this is also what's checked by reqwest::IntoUrl
+            if !url.has_host() {
+                return Some(Err(OutputError::InvalidUrl(url.clone())));
+            }
+            WorkItemKind::Fetch(url.clone())
+        }
+
         // NOTE: we deliberately don't care about expect_hash in Eval nodes for now
         NK::Eval => match new_root {
             Some(hash) => WorkItemKind::Eval(hash),
@@ -208,10 +230,10 @@ fn try_make_work_intern(
 }
 
 async fn schedule(
-    config: &Arc<ServerConfig>,
-    ex: &Executor<'static>,
-    mains: &Sender<MainMessage>,
-    jobsem: &Arc<Semaphore>,
+    config: Arc<ServerConfig>,
+    mains: Sender<MainMessage>,
+    jobsem: Arc<Semaphore>,
+    connpool: FetchConnPool,
     graph: &mut build_graph::Graph<NodeMeta>,
     nid: NodeIndex,
 ) {
@@ -266,13 +288,12 @@ async fn schedule(
             let log = ni.rest.log.clone();
             let jobsem = jobsem.clone();
             let mains = mains.clone();
-            ex.spawn(async move {
+            tokio::spawn(async move {
                 let _job = jobsem.acquire().await;
                 let det =
                     handle_process(&config, logtag, inhash, name, wir, expect_hash, log).await;
                 let _ = mains.send(MainMessage::Done { nid, det }).await;
-            })
-            .detach();
+            });
             return;
         }
         Ok(WorkItem {
@@ -287,7 +308,10 @@ async fn schedule(
             });
             if let Some(expect_hash) = expect_hash {
                 if expect_hash != outhash {
-                    det = Err(OutputError::HashMismatch(expect_hash, outhash));
+                    det = Err(OutputError::HashMismatch {
+                        expected: expect_hash,
+                        got: outhash,
+                    });
                 }
             }
             det
@@ -303,10 +327,47 @@ async fn schedule(
             });
             if let Some(expect_hash) = expect_hash {
                 if expect_hash != outhash {
-                    det = Err(OutputError::HashMismatch(expect_hash, outhash));
+                    det = Err(OutputError::HashMismatch {
+                        expected: expect_hash,
+                        got: outhash,
+                    });
                 }
             }
             det
+        }
+        Ok(WorkItem {
+            kind: WorkItemKind::Fetch(url),
+            expect_hash,
+        }) => {
+            let expect_hash = expect_hash.unwrap();
+
+            if std::path::Path::new(&config.store_path.join(expect_hash.to_string())).is_file() {
+                Ok(BuiltItem {
+                    inhash: None,
+                    dump: None,
+                    outhash: expect_hash,
+                })
+            } else {
+                let connpool = connpool.clone();
+                tokio::spawn(async move {
+                    let client = connpool.pop().await;
+                    let resp = client.get(url.clone()).send().await;
+                    let _ = connpool.push(client).await;
+                    let _ = mains
+                        .send(MainMessage::Done {
+                            nid,
+                            det: mangle_fetch_result(url, resp, expect_hash)
+                                .await
+                                .map(|dump| BuiltItem {
+                                    inhash: None,
+                                    dump: Some(Arc::new(dump)),
+                                    outhash: expect_hash,
+                                }),
+                        })
+                        .await;
+                });
+                return;
+            }
         }
         Ok(WorkItem {
             kind: WorkItemKind::Eval(outhash),
@@ -315,7 +376,7 @@ async fn schedule(
             let log = graph.0[nid].rest.log.clone();
             let store_path = config.store_path.clone();
             let mains = mains.clone();
-            ex.spawn(async move {
+            tokio::spawn(async move {
                 let det = match read_graph_from_store(&store_path, outhash) {
                     Ok(graph) => {
                         let _ = mains
@@ -338,8 +399,7 @@ async fn schedule(
                     Err(e) => Err(e),
                 };
                 let _ = mains.send(MainMessage::Done { nid, det }).await;
-            })
-            .detach();
+            });
             return;
         }
         Ok(WorkItem {
@@ -361,16 +421,18 @@ async fn schedule(
                     let mut det = None;
                     if let Some(expect_hash) = expect_hash {
                         if expect_hash != outhash {
-                            det = Some(Err(OutputError::HashMismatch(expect_hash, outhash)));
+                            det = Some(Err(OutputError::HashMismatch {
+                                expected: expect_hash,
+                                got: outhash,
+                            }));
                             success = false;
                         }
                     }
                     if success {
-                        let dump = Arc::new(dump);
                         push_response(graph, nid, ResponseKind::Dump(dump.clone())).await;
                         Ok(BuiltItem {
                             inhash,
-                            dump: Some(dump),
+                            dump: Some(Arc::new(dump)),
                             outhash,
                         })
                     } else {
@@ -387,7 +449,8 @@ async fn schedule(
     mains.send(MainMessage::Done { nid, det }).await.unwrap();
 }
 
-fn main() {
+#[tokio::main(flavor = "multi_thread")]
+async fn main() {
     // set the time zone to avoid funky locale stuff
     std::env::set_var("TZ", "UTC");
 
@@ -416,290 +479,316 @@ fn main() {
     std::fs::create_dir_all(&config.store_path).expect("unable to create store dir");
 
     let cpucnt = num_cpus::get();
-    let ex = Arc::new(yz_server_executor::ServerExecutor::with_threads(cpucnt));
     let jobsem = Arc::new(Semaphore::new(cpucnt));
 
-    ex.block_on(move |ex| async move {
-        let listener = async_net::TcpListener::bind(&config.socket_bind)
-            .await
-            .unwrap();
+    // setup fetch connection pool
+    let connpool = FetchConnPool::default();
 
-        // we don't need workers. we just spawn tasks instead
-        // this means that it is impossible to fix or modify
-        // running or older tasks. (invariant)
-        // we manage the graph in the main thread, it is !Sync+!Send
-
-        let (mains, mainr) = unbounded();
-        let mut graph = build_graph::Graph::default();
-
-        // install Ctrl+C handler
-        let mains2 = mains.clone();
-        ex.spawn(async move {
-            // wait for shutdown signal
-            async_ctrlc::CtrlC::new().unwrap().await;
-            let _ = mains2.send(MainMessage::Shutdown).await;
-        })
-        .detach();
-
-        // handle log forwarding
-        let mut logwbearer = HashMap::<String, Sender<LogFwdMessage>>::new();
-        for i in &config.bearer_tokens {
-            let (logs, logr) = unbounded();
-            logwbearer.insert(i.clone(), logs);
-            ex.spawn(async move {
-                let mut subs = smallvec::SmallVec::new();
-                while let Ok(x) = logr.recv().await {
-                    use LogFwdMessage as LFM;
-                    match x {
-                        LFM::Response(r) => {
-                            log_to_bunch(&mut subs, r).await;
-                        }
-                        LFM::Subscribe(s) => {
-                            subs.push(s);
-                        }
-                    }
-                }
-            })
-            .detach();
+    {
+        use std::time::Duration;
+        let cto = Duration::from_secs(30);
+        let tow = Duration::from_secs(600);
+        for _ in 0..cpucnt {
+            connpool
+                .push(
+                    reqwest::Client::builder()
+                        .user_agent("Yzix 0.1 server")
+                        .connect_timeout(cto)
+                        .timeout(tow)
+                        .build()
+                        .expect("unable to setup HTTP client"),
+                )
+                .await;
         }
-        let logwbearer = logwbearer;
+    }
 
-        ex.spawn(handle_clients_initial(
-            mains.clone(),
-            listener,
-            config.bearer_tokens.clone(),
-        ))
-        .detach();
+    let listener = async_net::TcpListener::bind(&config.socket_bind)
+        .await
+        .unwrap();
 
-        use MainMessage as MM;
-        while let Ok(x) = mainr.recv().await {
-            match x {
-                MM::Shutdown => break,
-                MM::Log(logline) => println!("{}", logline),
-                MM::ClientConn { conn, opts } => {
-                    ex.spawn(handle_client_io(
-                        &mains,
-                        conn,
-                        if opts.attach_to_logs {
-                            let (logs, logr) = unbounded();
-                            let _ = logwbearer[&opts.bearer_auth]
-                                .send(LogFwdMessage::Subscribe(logs))
-                                .await;
-                            Some((opts.bearer_auth.into(), logr))
-                        } else {
-                            None
-                        },
-                    ))
-                    .detach();
-                }
-                MM::Schedule {
-                    graph: graph2,
-                    attach_logs,
-                } => {
-                    let trt = if let Some(attach_logs) = attach_logs {
-                        let log = match attach_logs {
-                            AttachLogsKind::Bearer(bearer) => {
-                                smallvec::smallvec![logwbearer[&*bearer].clone()]
-                            }
-                            AttachLogsKind::Dup(log) => log,
-                        };
-                        graph.take_and_merge(
-                            graph2,
-                            |()| NodeMeta {
-                                output: Output::NotStarted,
-                                log: log.clone(),
-                            },
-                            |noder| noder.log.extend(log.clone()),
-                        )
-                    } else {
-                        graph.take_and_merge(
-                            graph2,
-                            |()| NodeMeta {
-                                output: Output::NotStarted,
-                                log: smallvec::smallvec![],
-                            },
-                            |_| {},
-                        )
-                    };
-                    for (_, nid) in trt {
-                        schedule(&config, ex, &mains, &jobsem, &mut graph, nid).await;
+    // we don't need workers. we just spawn tasks instead
+    // this means that it is impossible to fix or modify
+    // running or older tasks. (invariant)
+    // we manage the graph in the main thread, it is !Sync+!Send
+
+    let (mains, mainr) = unbounded();
+    let mut graph = build_graph::Graph::default();
+
+    // install Ctrl+C handler
+    let mains2 = mains.clone();
+    tokio::spawn(async move {
+        // wait for shutdown signal
+        async_ctrlc::CtrlC::new().unwrap().await;
+        let _ = mains2.send(MainMessage::Shutdown).await;
+    });
+
+    // handle log forwarding
+    let mut logwbearer = HashMap::<String, Sender<LogFwdMessage>>::new();
+    for i in &config.bearer_tokens {
+        let (logs, logr) = unbounded();
+        logwbearer.insert(i.clone(), logs);
+        tokio::spawn(async move {
+            let mut subs = smallvec::SmallVec::new();
+            while let Ok(x) = logr.recv().await {
+                use LogFwdMessage as LFM;
+                match x {
+                    LFM::Response(r) => {
+                        log_to_bunch(&mut subs, r).await;
+                    }
+                    LFM::Subscribe(s) => {
+                        subs.push(s);
                     }
                 }
-                MM::Done { nid, det } => {
-                    let mut node = &mut graph.0[nid];
-                    match det {
-                        Ok(BuiltItem {
-                            inhash,
-                            dump,
-                            outhash,
-                        }) => {
-                            let ohs = outhash.to_string();
-                            let dstpath = config.store_path.join(&ohs).into_std_path_buf();
-                            let mut err_output = None;
-                            if let Some(dump) = dump {
-                                let mut do_write = true;
-                                if dstpath.exists() {
-                                    if config.auto_repair {
-                                        match Dump::read_from_path(&dstpath) {
-                                            Ok(on_disk_dump) => {
-                                                let on_disk_hash =
-                                                    StoreHash::hash_complex(&on_disk_dump);
-                                                if on_disk_hash != outhash {
-                                                    println!(
-                                                        "WARNING: detected data corruption @ {}",
-                                                        outhash
-                                                    );
-                                                } else if on_disk_dump != *dump {
-                                                    println!(
-                                                        "ERROR: detected hash collision @ {}",
-                                                        outhash
-                                                    );
-                                                    err_output =
-                                                        Some(OutputError::HashCollision(outhash));
-                                                    do_write = false;
-                                                } else {
-                                                    do_write = false;
-                                                }
-                                            }
-                                            Err(e) => {
+            }
+        });
+    }
+    let logwbearer = logwbearer;
+
+    tokio::spawn(handle_clients_initial(
+        mains.clone(),
+        listener,
+        config.bearer_tokens.clone(),
+    ));
+
+    use MainMessage as MM;
+    while let Ok(x) = mainr.recv().await {
+        match x {
+            MM::Shutdown => break,
+            MM::Log(logline) => println!("{}", logline),
+            MM::ClientConn { conn, opts } => {
+                tokio::spawn(handle_client_io(
+                    &mains,
+                    conn,
+                    if opts.attach_to_logs {
+                        let (logs, logr) = unbounded();
+                        let _ = logwbearer[&opts.bearer_auth]
+                            .send(LogFwdMessage::Subscribe(logs))
+                            .await;
+                        Some((opts.bearer_auth.into(), logr))
+                    } else {
+                        None
+                    },
+                ));
+            }
+            MM::Schedule {
+                graph: graph2,
+                attach_logs,
+            } => {
+                let trt = if let Some(attach_logs) = attach_logs {
+                    let log = match attach_logs {
+                        AttachLogsKind::Bearer(bearer) => {
+                            smallvec::smallvec![logwbearer[&*bearer].clone()]
+                        }
+                        AttachLogsKind::Dup(log) => log,
+                    };
+                    graph.take_and_merge(
+                        graph2,
+                        |()| NodeMeta {
+                            output: Output::NotStarted,
+                            log: log.clone(),
+                        },
+                        |noder| noder.log.extend(log.clone()),
+                    )
+                } else {
+                    graph.take_and_merge(
+                        graph2,
+                        |()| NodeMeta {
+                            output: Output::NotStarted,
+                            log: smallvec::smallvec![],
+                        },
+                        |_| {},
+                    )
+                };
+                for (_, nid) in trt {
+                    schedule(
+                        config.clone(),
+                        mains.clone(),
+                        jobsem.clone(),
+                        connpool.clone(),
+                        &mut graph,
+                        nid,
+                    )
+                    .await;
+                }
+            }
+            MM::Done { nid, det } => {
+                let mut node = &mut graph.0[nid];
+                match det {
+                    Ok(BuiltItem {
+                        inhash,
+                        dump,
+                        outhash,
+                    }) => {
+                        let ohs = outhash.to_string();
+                        let dstpath = config.store_path.join(&ohs).into_std_path_buf();
+                        let mut err_output = None;
+                        if let Some(dump) = dump {
+                            let mut do_write = true;
+                            if dstpath.exists() {
+                                if config.auto_repair {
+                                    match Dump::read_from_path(&dstpath) {
+                                        Ok(on_disk_dump) => {
+                                            let on_disk_hash =
+                                                StoreHash::hash_complex(&on_disk_dump);
+                                            if on_disk_hash != outhash {
                                                 println!(
-                                                    "WARNING: error while dumping @ {}: {}",
-                                                    outhash, e
+                                                    "WARNING: detected data corruption @ {}",
+                                                    outhash
                                                 );
+                                            } else if on_disk_dump != *dump {
+                                                println!(
+                                                    "ERROR: detected hash collision @ {}",
+                                                    outhash
+                                                );
+                                                err_output =
+                                                    Some(OutputError::HashCollision(outhash));
+                                                do_write = false;
+                                            } else {
+                                                do_write = false;
                                             }
                                         }
-                                    } else {
-                                        do_write = false;
-                                    }
-                                }
-                                if do_write {
-                                    if let Err(e) = dump.write_to_path(&dstpath, true) {
-                                        println!("ERROR: {}", e);
-                                        err_output = Some(e.into());
-                                    }
-                                }
-                                if err_output.is_none() {
-                                    if let Some(inhash) = inhash {
-                                        let inpath = config
-                                            .store_path
-                                            .join(format!("{}.{}", inhash, INPUT_REALISATION_EXT));
-                                        let target = format!("{}", outhash).into();
-                                        let to_dir = match &*dump {
-                                            Dump::Directory(_) => true,
-                                            Dump::Regular { .. } => false,
-                                            Dump::SymLink { to_dir, .. } => *to_dir,
-                                        };
-                                        if let Err(e) = (Dump::SymLink { target, to_dir })
-                                            .write_to_path(inpath.as_std_path(), true)
-                                        {
-                                            // this is just caching, non-fatal
-                                            println!("ERROR: {}", e);
+                                        Err(e) => {
+                                            println!(
+                                                "WARNING: error while dumping @ {}: {}",
+                                                outhash, e
+                                            );
                                         }
                                     }
+                                } else {
+                                    do_write = false;
                                 }
                             }
-                            if err_output.is_none() && !dstpath.exists() {
-                                err_output = Some(OutputError::Unavailable);
+                            if do_write {
+                                if let Err(e) = dump.write_to_path(&dstpath, true) {
+                                    println!("ERROR: {}", e);
+                                    err_output = Some(e.into());
+                                }
                             }
-                            if let Some(e) = err_output {
-                                node.rest.output = Output::Failed(e.clone());
-                                push_response(&mut graph, nid, ResponseKind::OutputNotify(Err(e)))
-                                    .await;
-                            } else {
-                                node.rest.output = Output::Success(outhash);
-                                push_response(
+                            if err_output.is_none() {
+                                if let Some(inhash) = inhash {
+                                    let inpath = config
+                                        .store_path
+                                        .join(format!("{}.{}", inhash, INPUT_REALISATION_EXT));
+                                    let target = format!("{}", outhash).into();
+                                    let to_dir = match &*dump {
+                                        Dump::Directory(_) => true,
+                                        Dump::Regular { .. } => false,
+                                        Dump::SymLink { to_dir, .. } => *to_dir,
+                                    };
+                                    if let Err(e) = (Dump::SymLink { target, to_dir })
+                                        .write_to_path(inpath.as_std_path(), true)
+                                    {
+                                        // this is just caching, non-fatal
+                                        println!("ERROR: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                        if err_output.is_none() && !dstpath.exists() {
+                            err_output = Some(OutputError::Unavailable);
+                        }
+                        if let Some(e) = err_output {
+                            node.rest.output = Output::Failed(e.clone());
+                            push_response(&mut graph, nid, ResponseKind::OutputNotify(Err(e)))
+                                .await;
+                        } else {
+                            node.rest.output = Output::Success(outhash);
+                            push_response(&mut graph, nid, ResponseKind::OutputNotify(Ok(outhash)))
+                                .await;
+                            // schedule now available jobs
+                            let mut next_nodes = graph
+                                .0
+                                .neighbors_directed(nid, Direction::Incoming)
+                                .detach();
+                            while let Some(nid2) = next_nodes.next_node(&graph.0) {
+                                schedule(
+                                    config.clone(),
+                                    mains.clone(),
+                                    jobsem.clone(),
+                                    connpool.clone(),
                                     &mut graph,
-                                    nid,
-                                    ResponseKind::OutputNotify(Ok(outhash)),
+                                    nid2,
                                 )
                                 .await;
-                                // schedule now available jobs
-                                let mut next_nodes = graph
-                                    .0
-                                    .neighbors_directed(nid, Direction::Incoming)
-                                    .detach();
-                                while let Some(nid2) = next_nodes.next_node(&graph.0) {
-                                    schedule(&config, ex, &mains, &jobsem, &mut graph, nid2).await;
-                                }
                             }
                         }
-                        Err(oe) => {
-                            let rk = ResponseKind::LogLine {
-                                bldname: node.name.clone(),
-                                content: format!("ERROR: {}", oe),
-                            };
-                            println!("{}: ERROR: {}", node.name, oe);
-                            node.rest.output = Output::Failed(oe);
-                            push_response(&mut graph, nid, rk).await;
-                        }
                     }
-                }
-            }
-
-            // garbage collection, only necessary if the graph takes up too much space
-            // we clean up either if the graph contains more than 1000 nodes or uses more
-            // than 1 MiB memory.
-            if graph.0.node_count() == 0 {
-                continue;
-            } else if graph.0.node_count() < 1000 {
-                //if mw < 0x100000 {
-                //    continue;
-                //}
-            }
-
-            // propagate failures
-            for i in graph
-                .0
-                .node_indices()
-                .filter(|&i| matches!(graph.0[i].rest.output, Output::Failed(_)))
-                .collect::<Vec<_>>()
-            {
-                let mut ineigh = graph.0.neighbors_directed(i, Direction::Incoming).detach();
-                while let Some((je, js)) = ineigh.next(&graph.0) {
-                    let mo = &mut graph.0[js].rest.output;
-                    if *mo == Output::NotStarted {
-                        *mo = Output::Scheduled;
-                        // keep scheduler in sync
-                        mains
-                            .send(MainMessage::Done {
-                                nid: js,
-                                det: Err(OutputError::InputFailed(graph.0[je].clone())),
-                            })
-                            .await
-                            .unwrap();
+                    Err(oe) => {
+                        let rk = ResponseKind::LogLine {
+                            bldname: node.name.clone(),
+                            content: format!("ERROR: {}", oe),
+                        };
+                        println!("{}: ERROR: {}", node.name, oe);
+                        node.rest.output = Output::Failed(oe);
+                        push_response(&mut graph, nid, rk).await;
                     }
-                }
-            }
-
-            // search unnecessary nodes
-            let cnt = graph
-                .0
-                .node_indices()
-                .filter(|&i| {
-                    matches!(
-                        graph.0[i].rest.output,
-                        Output::Success(_) | Output::Failed(_)
-                    )
-                })
-                .filter(|&i| {
-                    graph
-                        .0
-                        .edges_directed(i, Direction::Incoming)
-                        .all(|j| graph.0[j.source()].rest.output != Output::NotStarted)
-                })
-                .collect::<Vec<_>>()
-                .into_iter()
-                .map(|i| graph.0.remove_node(i))
-                .count();
-            if cnt > 0 {
-                // DEBUG
-                println!("pruned {} node(s)", cnt);
-                if graph.0.node_count() == 0 {
-                    // reset to reclaim memory
-                    println!("reset to reclaim memory");
-                    graph.0 = Default::default();
                 }
             }
         }
-    });
+
+        // garbage collection, only necessary if the graph takes up too much space
+        // we clean up either if the graph contains more than 1000 nodes or uses more
+        // than 1 MiB memory.
+        if graph.0.node_count() == 0 {
+            continue;
+        } else if graph.0.node_count() < 1000 {
+            //if mw < 0x100000 {
+            //    continue;
+            //}
+        }
+
+        // propagate failures
+        for i in graph
+            .0
+            .node_indices()
+            .filter(|&i| matches!(graph.0[i].rest.output, Output::Failed(_)))
+            .collect::<Vec<_>>()
+        {
+            let mut ineigh = graph.0.neighbors_directed(i, Direction::Incoming).detach();
+            while let Some((je, js)) = ineigh.next(&graph.0) {
+                let mo = &mut graph.0[js].rest.output;
+                if *mo == Output::NotStarted {
+                    *mo = Output::Scheduled;
+                    // keep scheduler in sync
+                    mains
+                        .send(MainMessage::Done {
+                            nid: js,
+                            det: Err(OutputError::InputFailed(graph.0[je].clone())),
+                        })
+                        .await
+                        .unwrap();
+                }
+            }
+        }
+
+        // search unnecessary nodes
+        let cnt = graph
+            .0
+            .node_indices()
+            .filter(|&i| {
+                matches!(
+                    graph.0[i].rest.output,
+                    Output::Success(_) | Output::Failed(_)
+                )
+            })
+            .filter(|&i| {
+                graph
+                    .0
+                    .edges_directed(i, Direction::Incoming)
+                    .all(|j| graph.0[j.source()].rest.output != Output::NotStarted)
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|i| graph.0.remove_node(i))
+            .count();
+        if cnt > 0 {
+            // DEBUG
+            println!("pruned {} node(s)", cnt);
+            if graph.0.node_count() == 0 {
+                // reset to reclaim memory
+                println!("reset to reclaim memory");
+                graph.0 = Default::default();
+            }
+        }
+    }
 }

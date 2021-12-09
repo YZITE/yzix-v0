@@ -21,9 +21,6 @@ pub struct Node<T> {
     pub rest: T,
 }
 
-// we don't support FOD's for now,
-// I don't think they are strictly necessary, and if that
-// is proved wrong, we may always add them later.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase", tag = "type")]
 pub enum NodeKind {
@@ -43,6 +40,10 @@ pub enum NodeKind {
     /// to suppot some distcc-like workflow
     UnDump { dat: Arc<crate::store::Dump> },
 
+    /// a kind of fixed-output derivation, used to avoid
+    /// additional round-trips between client and server
+    Fetch { url: url::Url, hash: StoreHash },
+
     /// to avoid the need to always upload huge amount of data,
     /// use this to require a store path to be already present.
     Require { hash: StoreHash },
@@ -54,6 +55,7 @@ pub enum NodeKind {
     /// when this node is reached, send a combined dump of all
     /// inputs (with each input represented as an entry in the
     /// top-level, which is a directory
+    // TODO: maybe add a node kind to dump stuff into a S3 bucket.
     Dump,
 }
 
@@ -151,6 +153,12 @@ impl<T> Graph<T> {
                 cbor_write(dat, &mut tmp_ser).unwrap();
                 hasher.update(&tmp_ser);
                 hasher.update([0]);
+            }
+            NodeKind::Fetch { url, hash } => {
+                hasher.update(b"fetch\0");
+                hasher.update(url.as_str());
+                hasher.update([0]);
+                hasher.update(hash);
             }
             NodeKind::Require { .. } | NodeKind::Eval | NodeKind::Dump { .. } => {
                 return None;

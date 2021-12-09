@@ -3,6 +3,7 @@ use crate::{
     store::{Dump, Hash as StoreHash},
 };
 use serde::{Deserialize, Serialize};
+use url::Url;
 
 pub type Length = u64;
 
@@ -42,7 +43,7 @@ pub struct Response {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum ResponseKind {
     LogLine { bldname: String, content: String },
-    Dump(std::sync::Arc<Dump>),
+    Dump(Dump),
     OutputNotify(Result<StoreHash, OutputError>),
 }
 
@@ -57,8 +58,8 @@ pub enum OutputError {
     #[error("server-side I/O error with errno {0}")]
     Io(i32),
 
-    #[error("mismatch against AssertEqual ({0} != {1})")]
-    HashMismatch(StoreHash, StoreHash),
+    #[error("hash mismatch ({expected} != {got})")]
+    HashMismatch { expected: StoreHash, got: StoreHash },
 
     #[error("input edge {0:?} failed")]
     InputFailed(Edge),
@@ -68,6 +69,16 @@ pub enum OutputError {
 
     #[error("multiple input edges are equal, but not allowed: {0:?}")]
     InputDup(Edge),
+
+    #[error("invalid URL for fetch: {0}")]
+    InvalidUrl(Url),
+
+    #[error("fetch of {url:?} failed with {msg}")]
+    FetchFailed {
+        url: Option<Url>,
+        status: Option<u16>,
+        msg: String,
+    },
 
     #[error("given command is empty")]
     EmptyCommand,
@@ -114,5 +125,36 @@ impl From<std::num::TryFromIntError> for OutputError {
 impl From<nix::errno::Errno> for OutputError {
     fn from(e: nix::errno::Errno) -> OutputError {
         OutputError::Io(e as i32)
+    }
+}
+
+#[cfg(feature = "reqwest")]
+impl From<reqwest::Error> for OutputError {
+    fn from(e: reqwest::Error) -> OutputError {
+        OutputError::FetchFailed {
+            url: e.url().map(Clone::clone),
+            status: e.status().map(|x| x.as_u16()),
+            msg: e.to_string(),
+        }
+    }
+}
+
+#[cfg(feature = "serde_json")]
+impl From<serde_json::Error> for OutputError {
+    fn from(e: serde_json::Error) -> OutputError {
+        macro_rules! try_convert {
+            ($x:expr) => {
+                if let Ok(x) = $x.try_into() {
+                    x
+                } else {
+                    return OutputError::NumNarrowFailed;
+                }
+            };
+        }
+        OutputError::JsonDeserialize {
+            line: try_convert!(e.line()),
+            column: try_convert!(e.column()),
+            typ: format!("{:?}", e.classify()),
+        }
     }
 }
