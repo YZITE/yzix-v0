@@ -1,4 +1,4 @@
-use crate::MainMessage;
+use crate::{AttachLogsKind, MainMessage};
 use async_channel::{Receiver, Sender};
 use futures_lite::{future::zip, io as flio, AsyncReadExt, AsyncWriteExt};
 use std::collections::HashSet;
@@ -67,8 +67,8 @@ pub fn handle_client_io(
                             attach_to_logs,
                         } => MainMessage::Schedule {
                             graph,
-                            attach_logs_bearer_token: if attach_to_logs {
-                                attach_logs_bearer_token.clone()
+                            attach_logs: if attach_to_logs {
+                                attach_logs_bearer_token.clone().map(AttachLogsKind::Bearer)
                             } else {
                                 None
                             },

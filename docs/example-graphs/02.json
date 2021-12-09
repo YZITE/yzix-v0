@@ -1,0 +1,64 @@
+{
+  "nodes": [
+    {
+      "name": "hi2-require",
+      "kind": {
+        "type": "require",
+        "hash": [245, 193, 185, 100, 79, 216, 154, 208, 183, 96, 53, 74, 3, 69, 26, 0, 107, 243, 28, 111, 64, 221, 190, 183, 185, 208, 57, 124, 116, 237, 15, 208]
+      },
+      "logtag": 1,
+      "rest": null
+    },
+    {
+      "name": "alpine-require",
+      "kind": {
+        "type": "require",
+        "hash": [155, 206, 14, 23, 19, 159, 145, 89, 231, 23, 186, 38, 215, 155, 218, 246, 141, 102, 128, 87, 22, 15, 84, 198, 31, 110, 153, 133, 50, 207, 187, 40]
+      },
+      "logtag": 2,
+      "rest": null
+    },
+    {
+      "name": "use hi",
+      "kind": {
+        "type": "run",
+        "command": [
+          [
+            {
+              "String": "/bin/busybox"
+            }
+          ],
+          [
+            {
+              "String": "sh"
+            }
+          ],
+          [
+            {
+              "Placeholder": "hiinp"
+            }
+          ]
+        ],
+        "envs": {}
+      },
+      "logtag": 3,
+      "rest": null
+    }
+  ],
+  "node_holes": [],
+  "edge_property": "directed",
+  "edges": [
+    [
+      2,
+      1,
+      "Root"
+    ],
+    [
+      2,
+      0,
+      {
+        "Placeholder": "hiinp"
+      }
+    ]
+  ]
+}

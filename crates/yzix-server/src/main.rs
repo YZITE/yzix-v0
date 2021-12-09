@@ -70,7 +70,7 @@ pub enum MainMessage {
     },
     Schedule {
         graph: build_graph::Graph<()>,
-        attach_logs_bearer_token: Option<Arc<str>>,
+        attach_logs: Option<AttachLogsKind>,
     },
     Log(String),
     Shutdown,
@@ -78,6 +78,13 @@ pub enum MainMessage {
         nid: NodeIndex,
         det: Result<BuiltItem, OutputError>,
     },
+}
+
+pub enum AttachLogsKind {
+    // attach logs via bearer
+    Bearer(Arc<str>),
+    // dup existing logs
+    Dup(smallvec::SmallVec<[Sender<LogFwdMessage>; 1]>),
 }
 
 struct WorkItem {
@@ -95,6 +102,7 @@ enum WorkItemKind {
     Run(WorkItemRun),
     UnDump(Arc<Dump>),
     Require(StoreHash),
+    Eval(StoreHash),
     Dump(HashMap<String, StoreHash>),
 }
 
@@ -111,6 +119,8 @@ fn try_make_work_intern(
     g_: &build_graph::Graph<NodeMeta>,
     nid: NodeIndex,
 ) -> Option<Result<WorkItem, OutputError>> {
+    use build_graph::{Edge, NodeKind as NK};
+
     let pnw = &g_.0[nid];
     if pnw.rest.output != Output::NotStarted {
         return None;
@@ -125,7 +135,6 @@ fn try_make_work_intern(
     for e in g_.0.edges(nid) {
         let (ew, et) = (e.weight(), e.target());
         if let Output::Success(h) = g_.0[et].rest.output {
-            use build_graph::Edge;
             match ew {
                 Edge::AssertEqual => {
                     if let Some(x) = expect_hash {
@@ -139,15 +148,13 @@ fn try_make_work_intern(
                 Edge::Placeholder(iname) => {
                     use std::collections::hash_map::Entry;
                     match rphs.entry(iname.to_string()) {
-                        Entry::Occupied(_) => {
-                            return Some(Err(OutputError::InputDup(iname.to_string())))
-                        }
+                        Entry::Occupied(_) => return Some(Err(OutputError::InputDup(ew.clone()))),
                         Entry::Vacant(v) => v.insert(h),
                     };
                 }
                 Edge::Root => {
                     if new_root.is_some() {
-                        return Some(Err(OutputError::InputDup("{root}".to_string())));
+                        return Some(Err(OutputError::InputDup(ew.clone())));
                     }
                     new_root = Some(h);
                 }
@@ -158,7 +165,6 @@ fn try_make_work_intern(
     }
 
     // evaluate command and envs
-    use build_graph::NodeKind as NK;
 
     let kind = match &pnw.kind {
         NK::Run { command, envs } => {
@@ -167,7 +173,7 @@ fn try_make_work_intern(
                 .map(|i| eval_pat(store_path, &rphs, i))
                 .collect::<Result<Vec<_>, _>>()
             {
-                Err(e) => return Some(Err(OutputError::InputNotFound(e))),
+                Err(e) => return Some(Err(OutputError::InputNotFound(Edge::Placeholder(e)))),
                 Ok(x) if x.is_empty() => return Some(Err(OutputError::EmptyCommand)),
                 Ok(x) => x,
             };
@@ -178,7 +184,7 @@ fn try_make_work_intern(
                 .collect::<Result<HashMap<_, _>, _>>()
             {
                 Ok(x) => x,
-                Err(e) => return Some(Err(OutputError::InputNotFound(e))),
+                Err(e) => return Some(Err(OutputError::InputNotFound(Edge::Placeholder(e)))),
             };
 
             WorkItemKind::Run(WorkItemRun {
@@ -190,6 +196,12 @@ fn try_make_work_intern(
         NK::UnDump { dat } => WorkItemKind::UnDump(dat.clone()),
         NK::Require { hash } => WorkItemKind::Require(*hash),
         NK::Dump => WorkItemKind::Dump(rphs),
+
+        // NOTE: we deliberately don't care about expect_hash in Eval nodes for now
+        NK::Eval => match new_root {
+            Some(hash) => WorkItemKind::Eval(hash),
+            None => return Some(Err(OutputError::InputNotFound(Edge::Root))),
+        },
     };
 
     Some(Ok(WorkItem { kind, expect_hash }))
@@ -295,6 +307,40 @@ async fn schedule(
                 }
             }
             det
+        }
+        Ok(WorkItem {
+            kind: WorkItemKind::Eval(outhash),
+            ..
+        }) => {
+            let log = graph.0[nid].rest.log.clone();
+            let store_path = config.store_path.clone();
+            let mains = mains.clone();
+            ex.spawn(async move {
+                let det = match read_graph_from_store(&store_path, outhash) {
+                    Ok(graph) => {
+                        let _ = mains
+                            .send(MainMessage::Schedule {
+                                graph,
+                                attach_logs: if log.is_empty() {
+                                    None
+                                } else {
+                                    Some(AttachLogsKind::Dup(log))
+                                },
+                            })
+                            .await;
+                        // for the graph itself, as a fallback, this node is kinda transparent
+                        Ok(BuiltItem {
+                            inhash: None,
+                            dump: None,
+                            outhash,
+                        })
+                    }
+                    Err(e) => Err(e),
+                };
+                let _ = mains.send(MainMessage::Done { nid, det }).await;
+            })
+            .detach();
+            return;
         }
         Ok(WorkItem {
             kind: WorkItemKind::Dump(hsh),
@@ -448,17 +494,22 @@ fn main() {
                 }
                 MM::Schedule {
                     graph: graph2,
-                    attach_logs_bearer_token,
+                    attach_logs,
                 } => {
-                    let trt = if let Some(bearer) = attach_logs_bearer_token {
-                        let log = &logwbearer[&*bearer];
+                    let trt = if let Some(attach_logs) = attach_logs {
+                        let log = match attach_logs {
+                            AttachLogsKind::Bearer(bearer) => {
+                                smallvec::smallvec![logwbearer[&*bearer].clone()]
+                            }
+                            AttachLogsKind::Dup(log) => log,
+                        };
                         graph.take_and_merge(
                             graph2,
                             |()| NodeMeta {
                                 output: Output::NotStarted,
-                                log: smallvec::smallvec![log.clone()],
+                                log: log.clone(),
                             },
-                            |noder| noder.log.push(log.clone()),
+                            |noder| noder.log.extend(log.clone()),
                         )
                     } else {
                         graph.take_and_merge(

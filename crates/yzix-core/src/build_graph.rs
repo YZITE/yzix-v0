@@ -47,6 +47,10 @@ pub enum NodeKind {
     /// use this to require a store path to be already present.
     Require { hash: StoreHash },
 
+    /// requires a root edge as input, and evaluates it as a
+    /// json build graph. use carefully
+    Eval,
+
     /// when this node is reached, send a combined dump of all
     /// inputs (with each input represented as an entry in the
     /// top-level, which is a directory
@@ -148,12 +152,7 @@ impl<T> Graph<T> {
                 hasher.update(&tmp_ser);
                 hasher.update([0]);
             }
-            // would be pretty useless
-            NodeKind::Require { .. } => {
-                return None;
-            }
-            // always build notify nodes
-            NodeKind::Dump { .. } => {
+            NodeKind::Require { .. } | NodeKind::Eval | NodeKind::Dump { .. } => {
                 return None;
             }
         }

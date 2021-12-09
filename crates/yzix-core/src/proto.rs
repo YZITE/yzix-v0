@@ -1,5 +1,5 @@
 use crate::{
-    build_graph::Graph,
+    build_graph::{Edge, Graph},
     store::{Dump, Hash as StoreHash},
 };
 use serde::{Deserialize, Serialize};
@@ -60,14 +60,14 @@ pub enum OutputError {
     #[error("mismatch against AssertEqual ({0} != {1})")]
     HashMismatch(StoreHash, StoreHash),
 
-    #[error("input edges '{0:?}' failed")]
-    InputFailed(crate::build_graph::Edge),
+    #[error("input edge {0:?} failed")]
+    InputFailed(Edge),
 
-    #[error("missing input edge '{0}'")]
-    InputNotFound(String),
+    #[error("missing input edge {0:?}")]
+    InputNotFound(Edge),
 
-    #[error("multiple input edges used the same placeholder name '{0}'")]
-    InputDup(String),
+    #[error("multiple input edges are equal, but not allowed: {0:?}")]
+    InputDup(Edge),
 
     #[error("given command is empty")]
     EmptyCommand,
@@ -81,6 +81,14 @@ pub enum OutputError {
     #[error("store error: {0}")]
     Store(#[from] crate::store::Error),
 
+    #[error("number narrowing failed")]
+    NumNarrowFailed,
+
+    /// NOTE: line and column are one-based, but `serde_json` reserves
+    /// the right to also set them to null for some bound errors...
+    #[error("JSON deserialization error of type {typ} at {line}:{column}")]
+    JsonDeserialize { line: u64, column: u32, typ: String },
+
     #[error("an underspecified error happened: {0}")]
     Unknown(String),
 }
@@ -92,6 +100,12 @@ impl From<std::io::Error> for OutputError {
         } else {
             OutputError::Unknown(e.to_string())
         }
+    }
+}
+
+impl From<std::num::TryFromIntError> for OutputError {
+    fn from(_: std::num::TryFromIntError) -> OutputError {
+        OutputError::NumNarrowFailed
     }
 }
 

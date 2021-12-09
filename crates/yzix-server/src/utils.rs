@@ -201,21 +201,19 @@ pub async fn handle_process(
     let workdir = tempfile::tempdir()?;
     let rootdir = workdir.path().join("rootfs");
 
-    if let Some(new_root) = new_root {
+    let extra_env = if let Some(new_root) = new_root {
         // to work-around read-only stuff and such, copy the tree...
-        Dump::read_from_path(
-            &config
-                .store_path
-                .join(new_root.to_string())
-                .into_std_path_buf(),
-        )?
-        .write_to_path(&rootdir, true)?;
+        let rootfs = config.store_path.join(new_root.to_string());
+
+        Dump::read_from_path(rootfs.as_std_path())?.write_to_path(&rootdir, true)?;
         let mut perms = std::fs::metadata(&rootdir)?.permissions();
         perms.set_readonly(false);
         std::fs::set_permissions(&rootdir, perms)?;
+        Some(format!("ROOTFS={}", rootfs))
     } else {
         std::fs::create_dir_all(&rootdir)?;
-    }
+        None
+    };
 
     // generate spec
     write_linux_ocirt_spec(
@@ -224,6 +222,7 @@ pub async fn handle_process(
         args,
         envs.into_iter()
             .map(|(i, j)| format!("{}={}", i, j))
+            .chain(extra_env)
             .collect(),
         &workdir.path().join("config.json"),
     )?;
@@ -291,4 +290,19 @@ pub fn eval_pat(
         }
     }
     Ok(ret)
+}
+
+pub fn read_graph_from_store(
+    store_path: &Utf8Path,
+    outhash: StoreHash,
+) -> Result<build_graph::Graph<()>, OutputError> {
+    let dat = std::fs::read_to_string(store_path.join(outhash.to_string()).as_std_path())?;
+    match serde_json::from_str(&dat) {
+        Ok(x) => Ok(x),
+        Err(e) => Err(OutputError::JsonDeserialize {
+            line: e.line().try_into()?,
+            column: e.column().try_into()?,
+            typ: format!("{:?}", e.classify()),
+        }),
+    }
 }
