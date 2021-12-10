@@ -665,6 +665,10 @@ async fn main() {
         if graph.0.node_count() == 0 {
             continue;
         } else if graph.0.node_count() < 1000 {
+            // FIXME: if necessary, only run the garbage collection on
+            // small build graphs if the yzix-server process uses too much memory.
+            // it is necessary to check if this has any positive effect,
+            // we need to benchmark this.
             //if mw < 0x100000 {
             //    continue;
             //}
