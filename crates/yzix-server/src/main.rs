@@ -96,6 +96,7 @@ pub struct WorkItemRun {
     envs: HashMap<String, String>,
     new_root: Option<StoreHash>,
     outputs: HashSet<OutputName>,
+    need_store_mount: bool,
 
     log: smallvec::SmallVec<[Sender<LogFwdMessage>; 1]>,
     logtag: u64,
@@ -202,6 +203,7 @@ async fn schedule(
                     envs,
                     new_root,
                     outputs,
+                    uses_placeholders,
                 } => {
                     let ni = &graph.0[nid];
                     let logtag = ni.logtag;
@@ -223,6 +225,7 @@ async fn schedule(
                                 new_root,
                                 outputs,
                                 log,
+                                need_store_mount: uses_placeholders,
                             },
                         )
                         .await

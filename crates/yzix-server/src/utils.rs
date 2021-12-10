@@ -83,23 +83,59 @@ fn write_linux_ocirt_spec(
     args: Vec<String>,
     env: Vec<String>,
     specpath: &Path,
+    need_store_mount: bool,
 ) -> std::io::Result<()> {
     // NOTE: windows support is harder, because we need to use a hyperv container there...
     use oci_spec::runtime as osr;
     let mut mounts = osr::get_default_mounts();
-    mounts.push(
-        osr::MountBuilder::default()
-            .destination(&config.store_path)
-            .source(&config.store_path)
-            .typ("none")
-            .options(vec!["bind".to_string()])
-            .build()
-            .unwrap(),
-    );
+    // rootless: filter 'gid=' options in mount args
+    mounts
+        .iter_mut()
+        .filter(|i| {
+            i.options()
+                .as_ref()
+                .map(|i2| i2.iter().any(|j: &String| j.starts_with("gid=")))
+                .unwrap_or(false)
+        })
+        .for_each(|i| {
+            let newopts: Vec<_> = i
+                .options()
+                .as_ref()
+                .unwrap()
+                .iter()
+                .filter(|j| j.starts_with("gid="))
+                .cloned()
+                .collect();
+            *i = osr::MountBuilder::default()
+                .destination(i.destination())
+                .typ(i.typ().as_ref().unwrap())
+                .source(i.source().as_ref().unwrap())
+                .options(newopts)
+                .build()
+                .unwrap();
+        });
+    if need_store_mount {
+        mounts.push(
+            osr::MountBuilder::default()
+                .destination(&config.store_path)
+                .source(&config.store_path)
+                .typ("none")
+                .options(vec!["bind".to_string()])
+                .build()
+                .unwrap(),
+        );
+    }
     let mut caps = HashSet::new();
     caps.insert(osr::Capability::BlockSuspend);
     let mut ropaths = osr::get_default_readonly_paths();
     ropaths.push(config.store_path.to_string());
+    let mut namespaces = osr::get_default_namespaces();
+    namespaces.push(
+        osr::LinuxNamespaceBuilder::default()
+            .typ(osr::LinuxNamespaceType::User)
+            .build()
+            .unwrap(),
+    );
     let spec = osr::SpecBuilder::default()
         .version("1.0.0")
         .root(
@@ -158,7 +194,7 @@ fn write_linux_ocirt_spec(
                     .size(1u32)
                     .build()
                     .unwrap()])
-                .namespaces(osr::get_default_namespaces())
+                .namespaces(namespaces)
                 .masked_paths(osr::get_default_maskedpaths())
                 .readonly_paths(ropaths)
                 .build()
@@ -193,6 +229,7 @@ pub async fn handle_process(
         outputs,
         log,
         logtag,
+        need_store_mount,
     }: WorkItemRun,
 ) -> Result<BuiltItem, OutputError> {
     let workdir = tempfile::tempdir()?;
@@ -222,6 +259,7 @@ pub async fn handle_process(
             .chain(extra_env)
             .collect(),
         &workdir.path().join("config.json"),
+        need_store_mount,
     )?;
 
     use async_process::Stdio;

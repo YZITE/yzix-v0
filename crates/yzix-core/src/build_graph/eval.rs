@@ -16,10 +16,11 @@ fn eval_pattern(
     store_path: &Utf8Path,
     rphs: &HashMap<String, StoreHash>,
     xs: &[CmdArgSnip],
-) -> Result<String, String> {
+) -> Result<(String, bool), String> {
     // NOTE: do not use an iterator chain here,
     // as looping lets us handle string and returning more efficiently
     let mut ret = String::new();
+    let mut uses_placeholders = false;
     for x in xs {
         use CmdArgSnip as CArgS;
         match x {
@@ -27,13 +28,14 @@ fn eval_pattern(
             CArgS::Placeholder(iname) => {
                 if let Some(y) = rphs.get(iname) {
                     ret += store_path.join(y.to_string()).as_str();
+                    uses_placeholders = true;
                 } else {
                     return Err(iname.to_string());
                 }
             }
         }
     }
-    Ok(ret)
+    Ok((ret, uses_placeholders))
 }
 
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
@@ -46,6 +48,7 @@ pub enum WorkItem {
         new_root: Option<StoreHash>,
         /// invariant: `!outputs.is_empty()`
         outputs: HashSet<OutputName>,
+        uses_placeholders: bool,
     },
     UnDump {
         dat: Arc<Dump>,
@@ -141,9 +144,16 @@ impl<T: ReadOutHash> Graph<T> {
                 envs,
                 outputs,
             } => {
+                let mut uses_placeholders = false;
+
                 let args = match command
                     .iter()
-                    .map(|i| eval_pattern(store_path, &rphs, i))
+                    .map(|i| {
+                        eval_pattern(store_path, &rphs, i).map(|(j, upl)| {
+                            uses_placeholders |= upl;
+                            j
+                        })
+                    })
                     .collect::<Result<Vec<_>, _>>()
                 {
                     Err(e) => {
@@ -155,7 +165,12 @@ impl<T: ReadOutHash> Graph<T> {
 
                 let envs = match envs
                     .iter()
-                    .map(|(k, i)| eval_pattern(store_path, &rphs, i).map(|j| (k.to_string(), j)))
+                    .map(|(k, i)| {
+                        eval_pattern(store_path, &rphs, i).map(|(j, upl)| {
+                            uses_placeholders |= upl;
+                            (k.to_string(), j)
+                        })
+                    })
                     .collect::<Result<HashMap<_, _>, _>>()
                 {
                     Ok(x) => x,
@@ -177,6 +192,7 @@ impl<T: ReadOutHash> Graph<T> {
                     envs,
                     new_root,
                     outputs,
+                    uses_placeholders,
                 }
             }
             NK::UnDump { dat } => {
@@ -254,8 +270,8 @@ mod tests {
         assert_eq!(
             a_.unwrap().inputs_hash(),
             Some(StoreHash([
-                192, 60, 81, 233, 169, 109, 32, 73, 146, 118, 94, 219, 221, 4, 96, 6, 231, 239, 65,
-                182, 233, 207, 250, 178, 162, 192, 195, 32, 153, 92, 154, 77
+                240, 40, 148, 62, 109, 115, 165, 5, 250, 100, 153, 29, 194, 107, 31, 111, 190, 172,
+                242, 64, 220, 165, 128, 123, 50, 201, 218, 132, 248, 78, 242, 17
             ]))
         );
     }
