@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use yzix_core::build_graph::{self, Direction, EdgeRef, NodeIndex};
 use yzix_core::store::{Dump, Hash as StoreHash};
-use yzix_core::{OutputError, OutputName, Response, ResponseKind, Utf8PathBuf};
+use yzix_core::{OutputError, OutputName, Response, ResponseKind, Utf8Path, Utf8PathBuf};
 
 mod clients;
 use clients::{handle_client_io, handle_clients_initial};
@@ -118,7 +118,7 @@ impl BuiltItem {
     }
 }
 
-const INPUT_REALISATION_EXT: &str = "in";
+const INPUT_REALISATION_DIR_POSTFIX: &str = ".in2";
 
 async fn schedule(
     config: Arc<ServerConfig>,
@@ -141,29 +141,58 @@ async fn schedule(
             use build_graph::WorkItem as WI;
             let inhash = x.inputs_hash();
             if let Some(inhash) = inhash {
-                if let Ok(real_path) = std::fs::read_link(
+                if let Ok(realis_iter) = std::fs::read_dir(
                     config
                         .store_path
-                        .join(format!("{}.{}", inhash, INPUT_REALISATION_EXT)),
+                        .join(format!("{}{}", inhash, INPUT_REALISATION_DIR_POSTFIX))
+                        .into_std_path_buf(),
                 ) {
-                    if real_path.is_relative()
-                        && real_path.parent() == Some(std::path::Path::new(""))
+                    // determine list of necessary outputs
+                    // NOTE: we rely on the fact that no scheduling happens in parallel,
+                    // so we can assume no one observes that the output is already set
+                    // to scheduled, so that no additional graph is merged with the main one,
+                    // so that no additionally required outputs appear while we determine
+                    // the set of necessary outputs
+                    let super_dir = std::path::Path::new("..");
+                    // don't pessimize, read all available outputs
+                    let outputs: HashMap<_, _> = realis_iter
+                        .filter_map(|entry| {
+                            let entry = entry.ok()?;
+                            let name = entry
+                                .file_name()
+                                .to_str()
+                                .and_then(|filn| OutputName::new(filn.to_string()))?;
+                            let rp = std::fs::read_link(entry.path()).ok()?;
+                            Some((name, rp))
+                        })
+                        .filter(|(_, rp)| rp.is_relative() && rp.parent() == Some(super_dir))
+                        .filter_map(|(filn, rp)| {
+                            rp.file_name()
+                                .and_then(|rp| rp.to_str())
+                                .and_then(|rp| rp.parse::<StoreHash>().ok())
+                                .map(|outhash| (filn, (None, outhash)))
+                        })
+                        .collect();
+
+                    if graph
+                        .0
+                        .edges_directed(nid, Direction::Incoming)
+                        .map(|edge| &edge.weight().sel_output)
+                        .all(|sel_output| outputs.contains_key(&**sel_output))
                     {
-                        if let Some(real_path) = real_path.file_name().and_then(|rp| rp.to_str()) {
-                            if let Ok(cahash) = real_path.parse::<StoreHash>() {
-                                // lucky case: we have found a valid shortcut!
-                                // do not submit the inhash to main, it would only try
-                                // to rewrite it, we don't want that.
-                                mains
-                                    .send(MainMessage::Done {
-                                        nid,
-                                        det: Ok(Some(BuiltItem::with_single(None, None, cahash))),
-                                    })
-                                    .await
-                                    .unwrap();
-                                return;
-                            }
-                        }
+                        // lucky case: we have found a valid shortcut!
+                        // do not submit the inhash to main, it would only try
+                        // to rewrite it, we don't want that.
+                        mains
+                            .send(MainMessage::Done {
+                                nid,
+                                det: Ok(Some(BuiltItem {
+                                    inhash: None,
+                                    outputs,
+                                })),
+                            })
+                            .await
+                            .unwrap();
                     }
                 }
             }
@@ -475,6 +504,7 @@ async fn main() {
                 match det {
                     Ok(Some(BuiltItem { inhash, outputs })) => {
                         let mut success = true;
+                        let mut syms = std::collections::BTreeMap::new();
                         for (outname, (dump, outhash)) in &outputs {
                             let ohs = outhash.to_string();
                             let dstpath = config.store_path.join(&ohs).into_std_path_buf();
@@ -523,23 +553,18 @@ async fn main() {
                                         err_output = Some(e.into());
                                     }
                                 }
-                                if let Some(inhash) = inhash {
-                                    let inpath = config.store_path.join(format!(
-                                        "{}.{}.{}",
-                                        inhash, INPUT_REALISATION_EXT, outname
-                                    ));
-                                    let target = format!("{}", outhash).into();
+
+                                if err_output.is_none() {
+                                    let target = Utf8Path::new("..").join(outhash.to_string());
                                     let to_dir = match &*dump {
                                         Dump::Directory(_) => true,
                                         Dump::Regular { .. } => false,
                                         Dump::SymLink { to_dir, .. } => *to_dir,
                                     };
-                                    if let Err(e) = (Dump::SymLink { target, to_dir })
-                                        .write_to_path(inpath.as_std_path(), true)
-                                    {
-                                        // this is just caching, non-fatal
-                                        println!("ERROR: {}", e);
-                                    }
+                                    syms.insert(
+                                        outname.clone().into(),
+                                        Dump::SymLink { target, to_dir },
+                                    );
                                 }
                             }
                             if err_output.is_none() && !dstpath.exists() {
@@ -554,6 +579,19 @@ async fn main() {
                             }
                         }
 
+                        if let Some(inhash) = inhash {
+                            let inpath = config
+                                .store_path
+                                .join(format!("{}{}", inhash, INPUT_REALISATION_DIR_POSTFIX));
+                            // FIXME: how to deal with conflicting hashes?
+                            if let Err(e) =
+                                (Dump::Directory(syms)).write_to_path(inpath.as_std_path(), false)
+                            {
+                                // this is just caching, non-fatal
+                                println!("realisation write ERROR: {}", e);
+                            }
+                        }
+
                         if success {
                             let realisation = outputs
                                 .iter()
@@ -563,18 +601,43 @@ async fn main() {
                             push_response(node, ResponseKind::OutputNotify(Ok(realisation))).await;
 
                             // schedule now available jobs
-                            let mut next_nodes = graph
-                                .0
-                                .neighbors_directed(nid, Direction::Incoming)
-                                .detach();
-                            while let Some(nid2) = next_nodes.next_node(&graph.0) {
+                            let outputs: HashSet<_> = outputs.into_iter().map(|(i, _)| i).collect();
+                            let mut reschedule = false;
+                            let mut per_nid_necouts = HashMap::<_, HashSet<_>>::new();
+                            for edge in graph.0.edges_directed(nid, Direction::Incoming) {
+                                per_nid_necouts
+                                    .entry(edge.source())
+                                    .or_default()
+                                    .insert(edge.weight().sel_output.clone());
+                            }
+                            for (nid2, necouts) in per_nid_necouts {
+                                if necouts.is_subset(&outputs) {
+                                    debug_assert!(necouts.len() < outputs.len());
+                                    schedule(
+                                        config.clone(),
+                                        mains.clone(),
+                                        jobsem.clone(),
+                                        connpool.clone(),
+                                        &mut graph,
+                                        nid2,
+                                    )
+                                    .await;
+                                } else {
+                                    // this requires an output which is not yet available,
+                                    // e.g. because the input node was merged, and the
+                                    // nid2 was added to the main graph after scheduling
+                                    reschedule = true;
+                                }
+                            }
+                            if reschedule {
+                                graph.0[nid].rest.output = Output::NotStarted;
                                 schedule(
                                     config.clone(),
                                     mains.clone(),
                                     jobsem.clone(),
                                     connpool.clone(),
                                     &mut graph,
-                                    nid2,
+                                    nid,
                                 )
                                 .await;
                             }

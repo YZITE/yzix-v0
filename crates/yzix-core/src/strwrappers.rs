@@ -73,7 +73,7 @@ macro_rules! make_strwrapper {
 }
 
 make_strwrapper! { OutputName(outp) || "invalid output name"; {
-    if outp.contains(|i: char| !matches!(i, '0'..='9' | 'a'..='b' | 'A'..='B' | '_' | '-' | '.')) {
+    if outp.is_empty() || outp.contains(|i: char| !matches!(i, '0'..='9' | 'a'..='b' | 'A'..='B' | '_' | '-' | '.')) {
         None
     } else {
         Some(Self(outp))
