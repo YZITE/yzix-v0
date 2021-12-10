@@ -224,14 +224,17 @@ pub async fn handle_process(
     let rootdir = workdir.path().join("rootfs");
 
     let extra_env = if let Some(new_root) = new_root {
-        // to work-around read-only stuff and such, copy the tree...
-        let rootfs = config.store_path.join(new_root.to_string());
+        tokio::task::block_in_place(|| {
+            // to work-around read-only stuff and such, copy the tree...
+            let rootfs = config.store_path.join(new_root.to_string());
 
-        Dump::read_from_path(rootfs.as_std_path())?.write_to_path(&rootdir, true)?;
-        let mut perms = std::fs::metadata(&rootdir)?.permissions();
-        perms.set_readonly(false);
-        std::fs::set_permissions(&rootdir, perms)?;
-        Some(format!("ROOTFS={}", rootfs))
+            // this can take extremely long
+            Dump::read_from_path(rootfs.as_std_path())?.write_to_path(&rootdir, true)?;
+            let mut perms = std::fs::metadata(&rootdir)?.permissions();
+            perms.set_readonly(false);
+            std::fs::set_permissions(&rootdir, perms)?;
+            Ok::<_, OutputError>(Some(format!("ROOTFS={}", rootfs)))
+        })?
     } else {
         std::fs::create_dir_all(&rootdir)?;
         None
@@ -268,11 +271,16 @@ pub async fn handle_process(
             outputs: outputs
                 .into_iter()
                 .map(|i| {
-                    let dump = Dump::read_from_path(&rootdir.join("out"))?;
-                    let outhash = StoreHash::hash_complex(&dump);
-                    Ok((i, (Some(std::sync::Arc::new(dump)), outhash)))
+                    tokio::task::block_in_place(|| {
+                        let dump = Dump::read_from_path(&rootdir.join("out"))?;
+                        let outhash = StoreHash::hash_complex(&dump);
+                        Ok::<_, yzix_core::store::Error>((
+                            i,
+                            (Some(std::sync::Arc::new(dump)), outhash),
+                        ))
+                    })
                 })
-                .collect::<Result<_, yzix_core::store::Error>>()?,
+                .collect::<Result<_, _>>()?,
         })
     } else if let Some(x) = exs.code() {
         Err(OutputError::Exit(x))
@@ -290,11 +298,13 @@ pub fn read_graph_from_store(
     store_path: &Utf8Path,
     outhash: StoreHash,
 ) -> Result<build_graph::Graph<()>, OutputError> {
-    let real_path = store_path.join(outhash.to_string()).into_std_path_buf();
-    Ok(serde_json::from_str(
-        &std::fs::read_to_string(&real_path).map_err(|e| yzix_core::store::Error {
-            real_path,
-            kind: e.into(),
-        })?,
-    )?)
+    tokio::task::block_in_place(|| {
+        let real_path = store_path.join(outhash.to_string()).into_std_path_buf();
+        Ok(serde_json::from_str(
+            &std::fs::read_to_string(&real_path).map_err(|e| yzix_core::store::Error {
+                real_path,
+                kind: e.into(),
+            })?,
+        )?)
+    })
 }
