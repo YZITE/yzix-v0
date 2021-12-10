@@ -2,7 +2,6 @@ use crate::{BuiltItem, LogFwdMessage, NodeMeta, WorkItemRun};
 use async_channel::Sender;
 use async_process::Command;
 use futures_util::{
-    future::join,
     io::{AsyncBufReadExt, AsyncRead, BufReader},
     stream::StreamExt,
 };
@@ -262,7 +261,7 @@ pub async fn handle_process(
     let x = handle_logging(logtag, &bldname, log.clone(), ch.stdout.take().unwrap());
     let y = handle_logging(logtag, &bldname, log, ch.stderr.take().unwrap());
 
-    let exs = join(join(x, y), ch.status()).await.1?;
+    let exs = tokio::join!(x, y, ch.status()).2?;
     if exs.success() {
         Ok(BuiltItem {
             inhash,

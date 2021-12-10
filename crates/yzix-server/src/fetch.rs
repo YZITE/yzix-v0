@@ -26,7 +26,7 @@ pub async fn mangle_result(
         executable: false,
     };
 
-    let outhash = StoreHash::hash_complex(&dump);
+    let outhash = tokio::task::block_in_place(|| StoreHash::hash_complex(&dump));
 
     if let Some(expect_hash) = expect_hash {
         // verify hash

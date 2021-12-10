@@ -216,8 +216,8 @@ async fn schedule(
                     let containerpool = containerpool.clone();
                     let mains = mains.clone();
                     tokio::spawn(async move {
-                        let _job = jobsem.acquire().await;
-                        let container_name = containerpool.pop().await;
+                        let (_job, container_name) =
+                            tokio::join!(jobsem.acquire(), containerpool.pop());
                         let det = handle_process(
                             &config,
                             &container_name,
@@ -389,17 +389,16 @@ async fn main() {
         let cto = Duration::from_secs(30);
         let tow = Duration::from_secs(600);
         for _ in 0..cpucnt {
-            connpool
-                .push(
-                    FetchClient::builder()
-                        .user_agent("Yzix 0.1 server")
-                        .connect_timeout(cto)
-                        .timeout(tow)
-                        .build()
-                        .expect("unable to setup HTTP client"),
-                )
-                .await;
-            containerpool.push(format!("yzix-{}", random_name())).await;
+            let a = connpool.push(
+                FetchClient::builder()
+                    .user_agent("Yzix 0.1 server")
+                    .connect_timeout(cto)
+                    .timeout(tow)
+                    .build()
+                    .expect("unable to setup HTTP client"),
+            );
+            let b = containerpool.push(format!("yzix-{}", random_name()));
+            tokio::join!(a, b);
         }
     }
 
@@ -703,13 +702,15 @@ async fn main() {
                 if *mo == Output::NotStarted {
                     *mo = Output::Scheduled;
                     // keep scheduler in sync
-                    mains
-                        .send(MainMessage::Done {
-                            nid: js,
-                            det: Err(OutputError::InputFailed(graph.0[je].kind.clone())),
-                        })
-                        .await
-                        .unwrap();
+                    let (mains2, jek) = (mains.clone(), graph.0[je].kind.clone());
+                    tokio::spawn(async move {
+                        let _ = mains2
+                            .send(MainMessage::Done {
+                                nid: js,
+                                det: Err(OutputError::InputFailed(jek)),
+                            })
+                            .await;
+                    });
                 }
             }
         }
