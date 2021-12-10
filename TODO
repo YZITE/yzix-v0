@@ -11,3 +11,4 @@ a few things would be nice to have or somewhat important:
 - S3 support
 - reduce the amount of async channels in the server
 - regularly print progress for downloads
+- store (on-disk data) garbage collection
