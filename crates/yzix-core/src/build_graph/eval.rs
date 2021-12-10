@@ -227,7 +227,13 @@ impl<T: ReadOutHash> Graph<T> {
                 let mut rphsv = rphs.into_iter().map(|(_, x)| x);
                 if let Some(expected) = rphsv.next() {
                     for hash in rphsv {
-                        hash.verify(&expected)?;
+                        if hash != expected {
+                            return Err(OutputError::HashMismatch {
+                                expected,
+                                got: hash,
+                            }
+                            .into());
+                        }
                     }
                 }
                 WorkItem::VerificationOk

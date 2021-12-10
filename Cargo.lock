@@ -1548,6 +1548,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "url",
+ "yzix-store",
 ]
 
 [[package]]
@@ -1579,4 +1580,17 @@ dependencies = [
  "toml",
  "yzix-core",
  "yzix-pool",
+]
+
+[[package]]
+name = "yzix-store"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "blake2",
+ "camino",
+ "ciborium",
+ "filetime",
+ "serde",
+ "thiserror",
 ]

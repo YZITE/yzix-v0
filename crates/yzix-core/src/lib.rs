@@ -7,13 +7,13 @@
 )]
 
 pub mod build_graph;
-pub mod store;
 mod strwrappers;
 pub use crate::strwrappers::OutputName;
 
 pub use camino::{Utf8Path, Utf8PathBuf};
 pub use ciborium;
 pub use url::Url;
+pub use yzix_store as store;
 
 use crate::{
     build_graph::{EdgeKind, Graph},
