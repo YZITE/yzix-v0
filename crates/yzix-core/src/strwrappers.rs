@@ -73,7 +73,9 @@ macro_rules! make_strwrapper {
 }
 
 make_strwrapper! { OutputName(outp) || "invalid output name"; {
-    if outp.is_empty() || outp.contains(|i: char| !matches!(i, '0'..='9' | 'a'..='b' | 'A'..='B' | '_' | '-' | '.')) {
+    if outp.is_empty() || outp.contains(|i: char| {
+        !i.is_ascii_alphanumeric() && !matches!(i, '_' | '-' | '.')
+    }) {
         None
     } else {
         Some(Self(outp))
@@ -88,4 +90,16 @@ impl Default for OutputName {
 
 pub(crate) fn is_default_output(o: &OutputName) -> bool {
     &*o.0 == "out"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_default_output, OutputName};
+
+    #[test]
+    fn default_output_valid() {
+        let o = OutputName::default();
+        assert!(is_default_output(&o));
+        let _ = OutputName::new(o.to_string()).expect("roundtrip failed");
+    }
 }
