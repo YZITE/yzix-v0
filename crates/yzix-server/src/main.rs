@@ -72,7 +72,6 @@ pub enum MainMessage {
         graph: build_graph::Graph<()>,
         attach_logs: Option<AttachLogsKind>,
     },
-    Log(String),
     Shutdown,
     Done {
         nid: NodeIndex,
@@ -446,17 +445,24 @@ async fn main() {
     while let Ok(x) = mainr.recv().await {
         match x {
             MM::Shutdown => break,
-            MM::Log(logline) => println!("{}", logline),
             MM::ClientConn { conn, opts } => {
+                let bearer_auth: Arc<str> = opts.bearer_auth.into();
                 tokio::spawn(handle_client_io(
                     mains.clone(),
                     conn,
+                    // this is necessary to associate a schedule/subgraph
+                    // to a log; even if the current connection doesn't
+                    // want to receive logs, the user can have multiple
+                    // clients, and maybe another one wants to tail-f
+                    // the logs (this is also the recommended approach).
+                    bearer_auth.clone(),
                     if opts.attach_to_logs {
                         let (logs, logr) = unbounded();
-                        let _ = logwbearer[&opts.bearer_auth]
+                        logwbearer[&*bearer_auth]
                             .send(LogFwdMessage::Subscribe(logs))
-                            .await;
-                        Some((opts.bearer_auth.into(), logr))
+                            .await
+                            .ok()
+                            .map(|_| logr)
                     } else {
                         None
                     },
@@ -524,12 +530,12 @@ async fn main() {
                                                 let on_disk_hash =
                                                     StoreHash::hash_complex(&on_disk_dump);
                                                 if on_disk_hash != *outhash {
-                                                    println!(
-                                                        "WARNING: detected data corruption @ {}",
+                                                    eprintln!(
+                                                        "ERROR: detected data corruption @ {}",
                                                         outhash
                                                     );
                                                 } else if on_disk_dump != *dump {
-                                                    println!(
+                                                    eprintln!(
                                                         "ERROR: detected hash collision @ {}",
                                                         outhash
                                                     );
@@ -542,8 +548,8 @@ async fn main() {
                                                 }
                                             }
                                             Err(e) => {
-                                                println!(
-                                                    "WARNING: error while dumping @ {}: {}",
+                                                eprintln!(
+                                                    "ERROR: while dumping @ {}: {}",
                                                     outhash, e
                                                 );
                                             }
@@ -560,7 +566,7 @@ async fn main() {
                                             make_readonly: true,
                                         },
                                     ) {
-                                        println!("ERROR: {}", e);
+                                        eprintln!("ERROR: {}", e);
                                         err_output = Some(e.into());
                                     }
                                 }
@@ -603,7 +609,7 @@ async fn main() {
                                 },
                             ) {
                                 // this is just caching, non-fatal
-                                println!("realisation write ERROR: {}", e);
+                                eprintln!("realisation write ERROR: {}", e);
                             }
                         }
 
@@ -668,7 +674,7 @@ async fn main() {
                             bldname: node.name.clone(),
                             content: format!("ERROR: {}", oe),
                         };
-                        println!("{}: ERROR: {}", node.name, oe);
+                        eprintln!("{}: ERROR: {}", node.name, oe);
                         node.rest.output = Output::Failed(oe);
                         push_response(node, rk).await;
                     }
@@ -740,7 +746,6 @@ async fn main() {
         if cnt > 0 {
             // DEBUG
             println!("pruned {} node(s)", cnt);
-            println!("{:?}", graph.0);
             if graph.0.node_count() == 0 {
                 // reset to reclaim memory
                 println!("reset to reclaim memory");

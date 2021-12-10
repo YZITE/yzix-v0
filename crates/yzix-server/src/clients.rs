@@ -10,15 +10,9 @@ use yzix_core::{ControlCommand, Length as ProtoLength, Response};
 pub async fn handle_client_io(
     mains: Sender<MainMessage>,
     mut stream: TcpStream,
-    attach_logs: Option<(Arc<str>, Receiver<Arc<Response>>)>,
+    attach_logs_bearer_token: Arc<str>,
+    logr: Option<Receiver<Arc<Response>>>,
 ) {
-    let mainsi = mains.clone();
-    let mainso = mains;
-    let (attach_logs_bearer_token, logr) = match attach_logs {
-        Some((x, y)) => (Some(x), Some(y)),
-        None => (None, None),
-    };
-
     let (stream, mut stream2) = stream.split();
 
     // handle input
@@ -40,29 +34,20 @@ pub async fn handle_client_io(
                     Ok(x) => x,
                     Err(e) => {
                         // TODO: report error to client, maybe?
-                        if mainsi
-                            .send(MainMessage::Log(format!("CBOR ERROR: {}", e)))
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
+                        // this can happen either when the serialization format
+                        // between client and server mismatches,
+                        // or when we run into a ciborium bug.
+                        eprintln!("CBOR ERROR: {}", e);
                         let val: ciborium::value::Value = match ciborium::de::from_reader(&buf[..])
                         {
                             Err(_) => break,
                             Ok(x) => x,
                         };
-                        if mainsi
-                            .send(MainMessage::Log(format!("CBOR ERROR DEBUG: {:#?}", val)))
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
+                        eprintln!("CBOR ERROR DEBUG: {:#?}", val);
                         break;
                     }
                 };
-                if mainsi
+                if mains
                     .send(match cmd {
                         C::Schedule {
                             graph,
@@ -70,7 +55,7 @@ pub async fn handle_client_io(
                         } => MainMessage::Schedule {
                             graph,
                             attach_logs: if attach_to_logs {
-                                attach_logs_bearer_token.clone().map(AttachLogsKind::Bearer)
+                                Some(AttachLogsKind::Bearer(attach_logs_bearer_token.clone()))
                             } else {
                                 None
                             },
@@ -91,13 +76,7 @@ pub async fn handle_client_io(
                     buf.clear();
                     if let Err(e) = ciborium::ser::into_writer(&*x, &mut buf) {
                         // TODO: handle error
-                        if mainso
-                            .send(MainMessage::Log(format!("CBOR ERROR: {}", e)))
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
+                        eprintln!("CBOR ERROR: {}", e);
                     } else {
                         if stream2
                             .write_all(&ProtoLength::to_le_bytes(buf.len().try_into().unwrap()))
