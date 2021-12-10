@@ -21,4 +21,4 @@ features = ["std"]
 [dependencies.serde]
 version = "1.0"
 default-features = false
-features = ["derive", "rc", "std"]
+features = ["derive", "std"]

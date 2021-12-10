@@ -138,13 +138,6 @@ impl From<std::num::TryFromIntError> for OutputError {
     }
 }
 
-#[cfg(unix)]
-impl From<nix::errno::Errno> for OutputError {
-    fn from(e: nix::errno::Errno) -> OutputError {
-        OutputError::Io(e as i32)
-    }
-}
-
 #[cfg(feature = "reqwest")]
 impl From<reqwest::Error> for OutputError {
     fn from(e: reqwest::Error) -> OutputError {

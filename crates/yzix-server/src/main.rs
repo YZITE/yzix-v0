@@ -7,6 +7,7 @@
 )]
 
 use async_channel::{unbounded, Sender};
+use reqwest::Client as FetchClient;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -14,7 +15,6 @@ use yzix_core::build_graph::{self, Direction, EdgeRef, NodeIndex};
 use yzix_core::store::{Dump, Hash as StoreHash};
 use yzix_core::{OutputError, OutputName, Response, ResponseKind, Utf8Path, Utf8PathBuf};
 use yzix_pool::Pool;
-use reqwest::Client as FetchClient;
 
 mod clients;
 use clients::{handle_client_io, handle_clients_initial};
