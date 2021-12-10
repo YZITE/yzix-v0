@@ -28,8 +28,6 @@ pub struct ServerConfig {
     socket_bind: String,
     bearer_tokens: HashSet<String>,
     auto_repair: bool,
-    worker_uid: u32,
-    worker_gid: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
