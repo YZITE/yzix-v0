@@ -188,15 +188,46 @@ impl Dump {
                 }
 
                 #[cfg(unix)]
-                fs::set_permissions(
-                    x,
-                    std::os::unix::fs::PermissionsExt::from_mode(if *executable {
-                        0o555
-                    } else {
-                        0o444
-                    }),
-                )
-                .map_err(&mapef)?;
+                {
+                    if xattr::SUPPORTED_PLATFORM {
+                        // delete only non-system attributes for now
+                        // see also: https://github.com/NixOS/nix/pull/4765
+                        // e.g. we can't delete attributes like
+                        // - security.selinux
+                        // - system.nfs4_acl
+                        let rem_xattrs = xattr::list(x)
+                            .map_err(&mapef)?
+                            .flat_map(|i| i.into_string().ok())
+                            .filter(|i| !i.starts_with("security.") && !i.starts_with("system."))
+                            .collect::<Vec<_>>();
+                        if !rem_xattrs.is_empty() {
+                            // make the file temporary writable
+                            fs::set_permissions(
+                                x,
+                                std::os::unix::fs::PermissionsExt::from_mode(if *executable {
+                                    0o755
+                                } else {
+                                    0o644
+                                }),
+                            )
+                            .map_err(&mapef)?;
+
+                            for i in rem_xattrs {
+                                xattr::remove(x, i).map_err(&mapef)?;
+                            }
+                        }
+                    }
+
+                    fs::set_permissions(
+                        x,
+                        std::os::unix::fs::PermissionsExt::from_mode(if *executable {
+                            0o555
+                        } else {
+                            0o444
+                        }),
+                    )
+                    .map_err(&mapef)?;
+                }
             }
             Dump::Directory(contents) => {
                 if let Err(e) = fs::create_dir(&x) {
