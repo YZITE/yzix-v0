@@ -223,7 +223,13 @@ pub async fn handle_process(
             let rootfs = config.store_path.join(new_root.to_string());
 
             // this can take extremely long
-            Dump::read_from_path(rootfs.as_std_path())?.write_to_path(&rootdir, true)?;
+            Dump::read_from_path(rootfs.as_std_path())?.write_to_path(
+                &rootdir,
+                yzix_core::store::Flags {
+                    force: true,
+                    make_readonly: false,
+                },
+            )?;
             let mut perms = std::fs::metadata(&rootdir)?.permissions();
             perms.set_readonly(false);
             std::fs::set_permissions(&rootdir, perms)?;

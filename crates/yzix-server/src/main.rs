@@ -12,7 +12,7 @@ use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use yzix_core::build_graph::{self, Direction, EdgeRef, NodeIndex};
-use yzix_core::store::{Dump, Hash as StoreHash};
+use yzix_core::store::{Dump, Flags as DumpFlags, Hash as StoreHash};
 use yzix_core::{OutputError, OutputName, Response, ResponseKind, Utf8Path, Utf8PathBuf};
 use yzix_pool::Pool;
 
@@ -553,7 +553,13 @@ async fn main() {
                                     }
                                 }
                                 if do_write {
-                                    if let Err(e) = dump.write_to_path(&dstpath, true) {
+                                    if let Err(e) = dump.write_to_path(
+                                        &dstpath,
+                                        DumpFlags {
+                                            force: true,
+                                            make_readonly: true,
+                                        },
+                                    ) {
                                         println!("ERROR: {}", e);
                                         err_output = Some(e.into());
                                     }
@@ -589,9 +595,13 @@ async fn main() {
                                 .store_path
                                 .join(format!("{}{}", inhash, INPUT_REALISATION_DIR_POSTFIX));
                             // FIXME: how to deal with conflicting hashes?
-                            if let Err(e) =
-                                (Dump::Directory(syms)).write_to_path(inpath.as_std_path(), false)
-                            {
+                            if let Err(e) = (Dump::Directory(syms)).write_to_path(
+                                inpath.as_std_path(),
+                                DumpFlags {
+                                    force: false,
+                                    make_readonly: true,
+                                },
+                            ) {
                                 // this is just caching, non-fatal
                                 println!("realisation write ERROR: {}", e);
                             }

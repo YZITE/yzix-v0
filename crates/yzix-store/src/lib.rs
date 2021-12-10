@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::{convert, fmt};
 
 mod dump;
-pub use dump::Dump;
+// TODO: maybe rename Flags to something better...
+pub use dump::{Dump, Flags};
 
 // we can't use > 32 because serde (1.0.130) doesn't derive
 // Deserialize... etc. for array lengths > 32.
