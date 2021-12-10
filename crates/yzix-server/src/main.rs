@@ -195,6 +195,7 @@ async fn schedule(
                             })
                             .await
                             .unwrap();
+                        return;
                     }
                 }
             }
