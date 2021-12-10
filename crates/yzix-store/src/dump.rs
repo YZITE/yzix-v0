@@ -20,6 +20,12 @@ pub enum Dump {
     Directory(std::collections::BTreeMap<String, Dump>),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Flags {
+    pub force: bool,
+    pub make_readonly: bool,
+}
+
 #[allow(unused_variables)]
 impl Dump {
     pub fn read_from_path(x: &Path) -> Result<Self, Error> {
@@ -80,7 +86,7 @@ impl Dump {
 
     /// we require that the parent directory already exists,
     /// and will override the target path `x` if it already exists.
-    pub fn write_to_path(&self, x: &Path, force: bool) -> Result<(), Error> {
+    pub fn write_to_path(&self, x: &Path, flags: Flags) -> Result<(), Error> {
         // one second past epoch, necessary for e.g. GNU make to recognize
         // the dumped files as "oldest"
         // TODO: when https://github.com/alexcrichton/filetime/pull/75 is merged,
@@ -97,7 +103,7 @@ impl Dump {
 
         if let Ok(y) = fs::symlink_metadata(x) {
             if !y.is_dir() {
-                if force {
+                if flags.force {
                     let clrro = || {
                         #[cfg(windows)]
                         {
@@ -136,7 +142,7 @@ impl Dump {
                 }
             } else if let Dump::Directory(_) = self {
                 // passthrough
-            } else if force {
+            } else if flags.force {
                 fs::remove_dir_all(x).map_err(&mapef)?;
             } else {
                 return Err(Error {
@@ -181,7 +187,7 @@ impl Dump {
                 #[cfg(windows)]
                 {
                     let mut perms = fs::metadata(x).map_err(&mapef)?.permissions();
-                    if !perms.readonly() {
+                    if flags.make_readonly && !perms.readonly() {
                         perms.set_readonly(true);
                         fs::set_permissions(x, perms).map_err(&mapef)?;
                     }
@@ -218,20 +224,21 @@ impl Dump {
                         }
                     }
 
-                    fs::set_permissions(
-                        x,
-                        std::os::unix::fs::PermissionsExt::from_mode(if *executable {
-                            0o555
-                        } else {
-                            0o444
-                        }),
-                    )
-                    .map_err(&mapef)?;
+                    let mut permbits = 0o444;
+                    if *executable {
+                        permbits |= 0o111;
+                    }
+                    if !flags.make_readonly {
+                        permbits |= 0o200;
+                    }
+                    fs::set_permissions(x, std::os::unix::fs::PermissionsExt::from_mode(permbits))
+                        .map_err(&mapef)?;
                 }
             }
             Dump::Directory(contents) => {
                 if let Err(e) = fs::create_dir(&x) {
                     if e.kind() == IoErrorKind::AlreadyExists {
+                        let mut already_writable = false;
                         // the check at the start of the function should have taken
                         // care of the annoying edge cases.
                         // x is thus already a directory
@@ -244,19 +251,30 @@ impl Dump {
                                 .map(|x| contents.contains_key(&x))
                                 != Some(true)
                             {
-                                // file does not exist in the expected contents...
+                                // file does not exist in the entry list...
                                 let real_path = entry.path();
-                                if !force {
+                                if !flags.force {
                                     return Err(Error {
                                         real_path,
                                         kind: ErrorKind::OverwriteDeclined,
                                     });
-                                } else if entry.file_type().map_err(&mapef)?.is_dir() {
-                                    fs::remove_dir_all(real_path)
                                 } else {
-                                    fs::remove_file(real_path)
+                                    if !already_writable {
+                                        #[cfg(unix)]
+                                        fs::set_permissions(
+                                            x,
+                                            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+                                        )
+                                        .map_err(&mapef)?;
+                                        already_writable = true;
+                                    }
+                                    if entry.file_type().map_err(&mapef)?.is_dir() {
+                                        fs::remove_dir_all(real_path)
+                                    } else {
+                                        fs::remove_file(real_path)
+                                    }
+                                    .map_err(&mapef)?;
                                 }
-                                .map_err(&mapef)?;
                             }
                         }
                     }
@@ -271,13 +289,15 @@ impl Dump {
                     }
                     xs.push(name);
                     // this call also deals with cases where the file already exists
-                    Dump::write_to_path(val, &xs, force)?;
+                    Dump::write_to_path(val, &xs, flags)?;
                     xs.pop();
                 }
 
-                #[cfg(unix)]
-                fs::set_permissions(x, std::os::unix::fs::PermissionsExt::from_mode(0o555))
-                    .map_err(&mapef)?;
+                if flags.make_readonly {
+                    #[cfg(unix)]
+                    fs::set_permissions(x, std::os::unix::fs::PermissionsExt::from_mode(0o555))
+                        .map_err(&mapef)?;
+                }
             }
         }
         filetime::set_symlink_file_times(x, reftime, reftime).map_err(&mapef)
