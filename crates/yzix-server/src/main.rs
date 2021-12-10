@@ -89,17 +89,12 @@ pub enum AttachLogsKind {
 
 // this structure is used to avoid switching up argument order
 pub struct WorkItemRun {
-    inhash: Option<StoreHash>,
-    bldname: String,
-
+    inhash: StoreHash,
     args: Vec<String>,
     envs: HashMap<String, String>,
     new_root: Option<StoreHash>,
     outputs: HashSet<OutputName>,
     need_store_mount: bool,
-
-    log: smallvec::SmallVec<[Sender<LogFwdMessage>; 1]>,
-    logtag: u64,
 }
 
 pub struct BuiltItem {
@@ -207,11 +202,7 @@ async fn schedule(
                     outputs,
                     uses_placeholders,
                 } => {
-                    let ni = &graph.0[nid];
-                    let logtag = ni.logtag;
                     let config = config.clone();
-                    let bldname = ni.name.clone();
-                    let log = ni.rest.log.clone();
                     let jobsem = jobsem.clone();
                     let containerpool = containerpool.clone();
                     let mains = mains.clone();
@@ -222,14 +213,11 @@ async fn schedule(
                             &config,
                             &container_name,
                             WorkItemRun {
-                                logtag,
-                                inhash,
-                                bldname,
+                                inhash: inhash.unwrap(),
                                 args,
                                 envs,
                                 new_root,
                                 outputs,
-                                log,
                                 need_store_mount: uses_placeholders,
                             },
                         )
@@ -738,6 +726,7 @@ async fn main() {
         if cnt > 0 {
             // DEBUG
             println!("pruned {} node(s)", cnt);
+            println!("{:?}", graph.0);
             if graph.0.node_count() == 0 {
                 // reset to reclaim memory
                 println!("reset to reclaim memory");

@@ -1,12 +1,9 @@
 use crate::{BuiltItem, LogFwdMessage, NodeMeta, WorkItemRun};
-use async_channel::Sender;
+use async_channel::{Sender, Receiver};
 use async_process::Command;
-use futures_util::{
-    io::{AsyncBufReadExt, AsyncRead, BufReader},
-    stream::StreamExt,
-};
+use futures_util::StreamExt;
 use std::collections::HashSet;
-use std::{future::Future, marker::Unpin, path::Path, sync::Arc};
+use std::{future::Future, marker::Unpin, sync::Arc, path::Path};
 use yzix_core::build_graph;
 use yzix_core::store::{Dump, Hash as StoreHash};
 use yzix_core::Utf8Path;
@@ -46,12 +43,11 @@ pub fn push_response(
     )
 }
 
-async fn handle_logging<T: AsyncRead + Unpin>(
-    tag: u64,
-    bldname: &str,
-    mut log: smallvec::SmallVec<[Sender<LogFwdMessage>; 1]>,
+async fn handle_logging_to_intermed<T: futures_util::io::AsyncRead + Unpin>(
+    log: Sender<String>,
     pipe: T,
 ) {
+use futures_util::io::{AsyncBufReadExt, BufReader};
     let mut stream = BufReader::new(pipe).lines();
     while let Some(content) = stream.next().await {
         let content = match content {
@@ -59,21 +55,21 @@ async fn handle_logging<T: AsyncRead + Unpin>(
             // TODO: give the client a proper error serialization
             Err(e) => format!("I/O error: {}", e),
         };
-        log_to_bunch(
-            &mut log,
-            LogFwdMessage::Response(Arc::new(Response {
-                tag,
-                kind: ResponseKind::LogLine {
-                    bldname: bldname.to_string(),
-                    content,
-                },
-            })),
-        )
-        .await;
-        if log.is_empty() {
+        if log.send(content).await.is_err() {
             break;
         }
     }
+}
+
+async fn handle_logging_to_file(mut linp: Receiver<String>, loutp: &Path) -> std::io::Result<()> {
+    use tokio::{io::AsyncWriteExt};
+    let mut fout = tokio::fs::File::create(loutp).await?;
+    while let Some(content) = linp.next().await {
+        fout.write_all(content.as_bytes()).await?;
+        fout.write_all(b"\n").await?;
+    }
+    fout.flush().await?;
+    Ok(())
 }
 
 fn write_linux_ocirt_spec(
@@ -190,6 +186,7 @@ fn write_linux_ocirt_spec(
         .build()
         .unwrap();
 
+    println!("{:#?}", spec);
     std::fs::write(
         specpath,
         serde_json::to_string(&spec).expect("unable to serialize OCI spec"),
@@ -210,18 +207,17 @@ pub async fn handle_process(
     container_name: &str,
     WorkItemRun {
         inhash,
-        bldname,
         args,
         envs,
         new_root,
         outputs,
-        log,
-        logtag,
         need_store_mount,
     }: WorkItemRun,
 ) -> Result<BuiltItem, OutputError> {
+    println!("handle_process @ {}", container_name);
     let workdir = tempfile::tempdir()?;
     let rootdir = workdir.path().join("rootfs");
+    let logoutput = config.store_path.join(format!("{}.log", inhash));
 
     let extra_env = if let Some(new_root) = new_root {
         tokio::task::block_in_place(|| {
@@ -261,13 +257,16 @@ pub async fn handle_process(
         .stderr(Stdio::piped())
         .current_dir(workdir.path())
         .spawn()?;
-    let x = handle_logging(logtag, &bldname, log.clone(), ch.stdout.take().unwrap());
-    let y = handle_logging(logtag, &bldname, log, ch.stderr.take().unwrap());
+    let (logfwds, logfwdr) = async_channel::bounded(1000);
+    let x = handle_logging_to_intermed(logfwds.clone(), ch.stdout.take().unwrap());
+    let y = handle_logging_to_intermed(logfwds, ch.stderr.take().unwrap());
+    let z = handle_logging_to_file(logfwdr, logoutput.as_std_path());
 
-    let exs = tokio::join!(x, y, ch.status()).2?;
+    let (_, _, z, exs) = tokio::join!(x, y, z, ch.status());
+    let (_, exs) = (z?, exs?);
     if exs.success() {
         Ok(BuiltItem {
-            inhash,
+            inhash: Some(inhash),
             outputs: outputs
                 .into_iter()
                 .map(|i| {
