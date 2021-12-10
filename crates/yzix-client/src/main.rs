@@ -1,5 +1,5 @@
 use std::io::{Read, Write};
-use yzix_core::{build_graph as bg, ciborium, ControlCommand, Response, ResponseKind as RK};
+use yzix_core::{build_graph as bg, ciborium, ControlCommand, Response};
 
 fn establish_connection(
     server: &str,
@@ -127,27 +127,10 @@ fn main() {
             let resp: Response =
                 ciborium::de::from_reader(&dat[..]).expect("unable to deserialize response");
 
-            let tag = resp.tag;
-            match resp.kind {
-                RK::LogLine { bldname, content } => {
-                    if tag != 0 {
-                        print!("{}:", tag);
-                    }
-                    println!("{}> {}", bldname, content);
-                }
-                RK::Dump(dump) => {
-                    println!("{}:[DUMP] {:?}", tag, dump);
-                }
-                RK::OutputNotify(Ok(outputs)) => {
-                    println!("{}:=>", tag);
-                    for (key, outhash) in outputs {
-                        println!("\t{}->{} {:?}", key, outhash, outhash.0);
-                    }
-                }
-                RK::OutputNotify(Err(oe)) => {
-                    println!("{}:[ERROR] {:?}", tag, oe);
-                }
+            if resp.tag != 0 {
+                print!("{}:", resp.tag);
             }
+            println!("{:#}", resp.kind);
         }
     } else if let Some(scmd) = matches.subcommand_matches("upload") {
         let mut graph = bg::Graph::default();

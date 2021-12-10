@@ -20,7 +20,7 @@ use crate::{
     store::{Dump, Hash as StoreHash},
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt};
 
 pub type Length = u64;
 
@@ -62,6 +62,32 @@ pub enum ResponseKind {
     LogLine { bldname: String, content: String },
     Dump(Dump),
     OutputNotify(Result<HashMap<OutputName, StoreHash>, OutputError>),
+}
+
+impl fmt::Display for ResponseKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use ResponseKind as RK;
+        match self {
+            RK::LogLine { bldname, content } => {
+                write!(f, "{}> {}", bldname, content)
+            }
+            RK::Dump(dump) => {
+                write!(f, "[DUMP] {:?}", dump)
+            }
+            RK::OutputNotify(Ok(outputs)) => {
+                for (key, outhash) in outputs {
+                    write!(f, "\t{}->{}", key, outhash)?;
+                    if f.alternate() {
+                        writeln!(f)?;
+                    }
+                }
+                Ok(())
+            }
+            RK::OutputNotify(Err(oe)) => {
+                write!(f, "[ERROR] {:?}", oe)
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, thiserror::Error)]
