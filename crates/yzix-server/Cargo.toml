@@ -2,7 +2,7 @@
 name = "yzix-server"
 version = "0.1.0"
 edition = "2021"
-license = "Apache-2.0 WITH LLVM-exception"
+license = "Apache-2.0"
 
 [dependencies]
 async-channel = "1.6"
