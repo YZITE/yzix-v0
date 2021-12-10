@@ -9,7 +9,7 @@ use yzix_core::store::{Dump, Hash as StoreHash};
 use yzix_core::Utf8Path;
 use yzix_core::{OutputError, Response, ResponseKind};
 
-pub async fn log_to_bunch<T: Clone>(subs: &mut smallvec::SmallVec<[Sender<T>; 1]>, msg: T) {
+pub async fn log_to_bunch<T: Clone>(subs: &mut Vec<Sender<T>>, msg: T) {
     let mut cnt = 0usize;
     let mut bs = bit_set::BitSet::with_capacity(subs.len());
     {

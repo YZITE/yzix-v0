@@ -50,7 +50,7 @@ pub enum LogFwdMessage {
 #[derive(Debug)]
 pub struct NodeMeta {
     output: Output,
-    log: smallvec::SmallVec<[Sender<LogFwdMessage>; 1]>,
+    log: Vec<Sender<LogFwdMessage>>,
 }
 
 impl build_graph::ReadOutHash for NodeMeta {
@@ -84,7 +84,7 @@ pub enum AttachLogsKind {
     // attach logs via bearer
     Bearer(Arc<str>),
     // dup existing logs
-    Dup(smallvec::SmallVec<[Sender<LogFwdMessage>; 1]>),
+    Dup(Vec<Sender<LogFwdMessage>>),
 }
 
 // this structure is used to avoid switching up argument order
@@ -420,7 +420,7 @@ async fn main() {
         let (logs, logr) = unbounded();
         logwbearer.insert(i.clone(), logs);
         tokio::spawn(async move {
-            let mut subs = smallvec::SmallVec::new();
+            let mut subs = Vec::new();
             while let Ok(x) = logr.recv().await {
                 use LogFwdMessage as LFM;
                 match x {
@@ -469,7 +469,7 @@ async fn main() {
                 let trt = if let Some(attach_logs) = attach_logs {
                     let log = match attach_logs {
                         AttachLogsKind::Bearer(bearer) => {
-                            smallvec::smallvec![logwbearer[&*bearer].clone()]
+                            vec![logwbearer[&*bearer].clone()]
                         }
                         AttachLogsKind::Dup(log) => log,
                     };
@@ -486,7 +486,7 @@ async fn main() {
                         graph2,
                         |()| NodeMeta {
                             output: Output::NotStarted,
-                            log: smallvec::smallvec![],
+                            log: vec![],
                         },
                         |_| {},
                     )
