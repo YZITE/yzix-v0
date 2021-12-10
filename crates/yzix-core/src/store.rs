@@ -205,12 +205,39 @@ impl Dump {
             real_path: x.to_path_buf(),
             kind: e.into(),
         };
+        let mut skip_write = false;
 
         if let Ok(y) = fs::symlink_metadata(x) {
             if !y.is_dir() {
                 if force {
-                    // TODO: optimize for the case when the file is exactly the same
-                    fs::remove_file(x).map_err(&mapef)?;
+                    let clrro = || {
+
+                        #[cfg(windows)]
+                        {
+                            // clear read-only attribute on windows, because
+                            // otherwise it would prevent deletion
+                            let mut perms = y.permissions();
+                            if perms.readonly() {
+                                perms.set_readonly(false);
+                                fs::set_permissions(x, perms).map_err(&mapef)?;
+                            }
+                        }
+
+                    };
+
+                    if let Dump::Regular { contents, executable } = self {
+                        let cur_contents = fs::read(x).map_err(&mapef)?;
+                        if &cur_contents == contents {
+                            skip_write = true;
+                        } else {
+                            clrro();
+                            // omit file deletion here because
+                            // we overwrite it anyways
+                        }
+                    } else {
+                        clrro();
+                        fs::remove_file(x).map_err(&mapef)?;
+                    }
                 } else {
                     return Err(Error {
                         real_path: x.to_path_buf(),
@@ -257,7 +284,18 @@ impl Dump {
                 executable,
                 contents,
             } => {
-                fs::write(x, contents).map_err(&mapef)?;
+                if !skip_write {
+                    fs::write(x, contents).map_err(&mapef)?;
+                }
+
+                #[cfg(windows)]
+                {
+                    let mut perms = fs::metadata(x).map_err(&mapef)?.permissions();
+                    if !perms.readonly() {
+                        perms.set_readonly(true);
+                        fs::set_permissions(x, perms).map_err(&mapef)?;
+                    }
+                }
 
                 #[cfg(unix)]
                 fs::set_permissions(
