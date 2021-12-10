@@ -1,5 +1,5 @@
 use std::io::{Read, Write};
-use yzix_core::{ciborium, ControlCommand, Response, ResponseKind as RK, build_graph as bg};
+use yzix_core::{build_graph as bg, ciborium, ControlCommand, Response, ResponseKind as RK};
 
 fn establish_connection(
     server: &str,
@@ -84,11 +84,10 @@ fn main() {
     };
 
     if let Some(scmd) = matches.subcommand_matches("schedule") {
-        let graph: bg::Graph<()> =
-            serde_json::from_reader(std::io::BufReader::new(
-                std::fs::File::open(scmd.value_of("GRAPH").unwrap()).expect("unable to open graph"),
-            ))
-            .expect("unable to parse graph from file");
+        let graph: bg::Graph<()> = serde_json::from_reader(std::io::BufReader::new(
+            std::fs::File::open(scmd.value_of("GRAPH").unwrap()).expect("unable to open graph"),
+        ))
+        .expect("unable to parse graph from file");
 
         let schedule_cmd = ControlCommand::Schedule {
             graph,

@@ -281,4 +281,47 @@ mod tests {
             ]))
         );
     }
+
+    #[test]
+    fn basic_eval_pattern() {
+        let store_path = "/yzix/is/not/nix";
+
+        let mut rphs = HashMap::new();
+        rphs.insert(
+            "alpine".to_string(),
+            "m84OFxOfkVnnF7om15va9o1mgFcWD1TGH26ZhTLPuyg"
+                .parse()
+                .unwrap(),
+        );
+        let xs: Vec<_> = crate::pattern!(I "/bin/busybox"; I "sh"; I "echo")
+            .into_iter()
+            .map(|i| eval_pattern(Utf8Path::new(store_path), &rphs, &i).unwrap())
+            .map(|(a, b)| {
+                assert!(!b);
+                a
+            })
+            .collect();
+        assert_eq!(
+            xs,
+            ["/bin/busybox", "sh", "echo"]
+                .into_iter()
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+        );
+
+        let xs: Vec<_> = crate::pattern!(I "/bin/busybox"; I "$$", P "alpine")
+            .into_iter()
+            .map(|i| eval_pattern(Utf8Path::new(store_path), &rphs, &i).unwrap())
+            .collect();
+        assert_eq!(
+            xs,
+            vec![
+                ("/bin/busybox".to_string(), false),
+                (
+                    "$$/yzix/is/not/nix/m84OFxOfkVnnF7om15va9o1mgFcWD1TGH26ZhTLPuyg".to_string(),
+                    true
+                )
+            ]
+        );
+    }
 }

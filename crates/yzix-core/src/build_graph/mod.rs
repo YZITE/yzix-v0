@@ -14,6 +14,28 @@ pub enum CmdArgSnip {
     Placeholder(String),
 }
 
+#[doc(hidden)]
+#[macro_export]
+macro_rules! pattern_internal {
+    (P $x:literal) => {{
+        $crate::build_graph::CmdArgSnip::Placeholder($x.to_string())
+    }};
+    (I $x:literal) => {{
+        $crate::build_graph::CmdArgSnip::String($x.to_string())
+    }};
+}
+
+#[macro_export]
+macro_rules! pattern {
+    ($($($t:ident $x:expr),*);+$(;)?) => {
+        ::std::vec![
+            $(::std::vec![
+                $( $crate::pattern_internal!($t $x) ),*
+            ]),+
+        ]
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Node<T> {
     pub name: String,

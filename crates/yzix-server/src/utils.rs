@@ -1,9 +1,9 @@
 use crate::{BuiltItem, LogFwdMessage, NodeMeta, WorkItemRun};
-use async_channel::{Sender, Receiver};
+use async_channel::{Receiver, Sender};
 use async_process::Command;
 use futures_util::StreamExt;
 use std::collections::HashSet;
-use std::{future::Future, marker::Unpin, sync::Arc, path::Path};
+use std::{future::Future, marker::Unpin, path::Path, sync::Arc};
 use yzix_core::build_graph;
 use yzix_core::store::{Dump, Hash as StoreHash};
 use yzix_core::Utf8Path;
@@ -47,7 +47,7 @@ async fn handle_logging_to_intermed<T: futures_util::io::AsyncRead + Unpin>(
     log: Sender<String>,
     pipe: T,
 ) {
-use futures_util::io::{AsyncBufReadExt, BufReader};
+    use futures_util::io::{AsyncBufReadExt, BufReader};
     let mut stream = BufReader::new(pipe).lines();
     while let Some(content) = stream.next().await {
         let content = match content {
@@ -62,7 +62,7 @@ use futures_util::io::{AsyncBufReadExt, BufReader};
 }
 
 async fn handle_logging_to_file(mut linp: Receiver<String>, loutp: &Path) -> std::io::Result<()> {
-    use tokio::{io::AsyncWriteExt};
+    use tokio::io::AsyncWriteExt;
     let mut fout = tokio::fs::File::create(loutp).await?;
     while let Some(content) = linp.next().await {
         fout.write_all(content.as_bytes()).await?;
@@ -98,7 +98,7 @@ fn write_linux_ocirt_spec(
                 .as_ref()
                 .unwrap()
                 .iter()
-                .filter(|j| j.starts_with("gid="))
+                .filter(|j| !j.starts_with("gid="))
                 .cloned()
                 .collect();
             *i = osr::MountBuilder::default()
@@ -186,7 +186,6 @@ fn write_linux_ocirt_spec(
         .build()
         .unwrap();
 
-    println!("{:#?}", spec);
     std::fs::write(
         specpath,
         serde_json::to_string(&spec).expect("unable to serialize OCI spec"),
@@ -214,7 +213,6 @@ pub async fn handle_process(
         need_store_mount,
     }: WorkItemRun,
 ) -> Result<BuiltItem, OutputError> {
-    println!("handle_process @ {}", container_name);
     let workdir = tempfile::tempdir()?;
     let rootdir = workdir.path().join("rootfs");
     let logoutput = config.store_path.join(format!("{}.log", inhash));
@@ -251,7 +249,12 @@ pub async fn handle_process(
 
     use async_process::Stdio;
     let mut ch = Command::new(&config.container_runner)
-        .args(vec!["run".to_string(), container_name.to_string()])
+        .args(vec![
+            "--root".to_string(),
+            config.store_path.join(".runc").into_string(),
+            "run".to_string(),
+            container_name.to_string(),
+        ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

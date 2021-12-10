@@ -207,8 +207,8 @@ async fn schedule(
                     let containerpool = containerpool.clone();
                     let mains = mains.clone();
                     tokio::spawn(async move {
-                        let (_job, container_name) =
-                            tokio::join!(jobsem.acquire(), containerpool.pop());
+                        let _job = jobsem.acquire().await;
+                        let container_name = containerpool.pop().await;
                         let det = handle_process(
                             &config,
                             &container_name,
@@ -324,6 +324,10 @@ async fn schedule(
                 Err(OutputError::InputFailed(graph.0[je].kind.clone()))
             } else {
                 // inputs missing
+                // NOTE: do not delete the next line, it prevents a deadlock
+                // of graph processing, because otherwise we would just stop
+                // processing this input without scheduling it ever again.
+                graph.0[nid].rest.output = Output::NotStarted;
                 return;
             }
         }
