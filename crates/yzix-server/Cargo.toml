@@ -37,3 +37,6 @@ features = ["macros", "net", "rt", "rt-multi-thread", "signal", "sync"]
 [dependencies.yzix-core]
 path = "../yzix-core"
 features = ["reqwest", "serde_json"]
+
+[dependencies.yzix-pool]
+path = "../yzix-pool"

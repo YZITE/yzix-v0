@@ -12,3 +12,5 @@ a few things would be nice to have or somewhat important:
 - reduce the amount of async channels in the server
 - regularly print progress for downloads
 - store (on-disk data) garbage collection
+- introduce a clonable struct which contains all reference-counted objects given to
+  async schedule(...) in yzix-server, to make the argument list of it smaller

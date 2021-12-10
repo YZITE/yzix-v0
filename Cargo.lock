@@ -1551,6 +1551,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "yzix-pool"
+version = "0.1.0"
+dependencies = [
+ "async-channel",
+ "futures-util",
+]
+
+[[package]]
 name = "yzix-server"
 version = "0.1.0"
 dependencies = [
@@ -1570,4 +1578,5 @@ dependencies = [
  "tokio",
  "toml",
  "yzix-core",
+ "yzix-pool",
 ]

@@ -13,11 +13,13 @@ use std::sync::Arc;
 use yzix_core::build_graph::{self, Direction, EdgeRef, NodeIndex};
 use yzix_core::store::{Dump, Hash as StoreHash};
 use yzix_core::{OutputError, OutputName, Response, ResponseKind, Utf8Path, Utf8PathBuf};
+use yzix_pool::Pool;
+use reqwest::Client as FetchClient;
 
 mod clients;
 use clients::{handle_client_io, handle_clients_initial};
 mod fetch;
-use fetch::{mangle_result as mangle_fetch_result, ConnPool as FetchConnPool};
+use fetch::mangle_result as mangle_fetch_result;
 mod utils;
 use utils::*;
 
@@ -123,7 +125,8 @@ async fn schedule(
     config: Arc<ServerConfig>,
     mains: Sender<MainMessage>,
     jobsem: Arc<tokio::sync::Semaphore>,
-    connpool: FetchConnPool,
+    connpool: Pool<FetchClient>,
+    containerpool: Pool<String>,
     graph: &mut build_graph::Graph<NodeMeta>,
     nid: NodeIndex,
 ) {
@@ -209,11 +212,14 @@ async fn schedule(
                     let bldname = ni.name.clone();
                     let log = ni.rest.log.clone();
                     let jobsem = jobsem.clone();
+                    let containerpool = containerpool.clone();
                     let mains = mains.clone();
                     tokio::spawn(async move {
                         let _job = jobsem.acquire().await;
+                        let container_name = containerpool.pop().await;
                         let det = handle_process(
                             &config,
+                            &container_name,
                             WorkItemRun {
                                 logtag,
                                 inhash,
@@ -228,7 +234,10 @@ async fn schedule(
                         )
                         .await
                         .map(Some);
-                        let _ = mains.send(MainMessage::Done { nid, det }).await;
+                        let _ = tokio::join!(
+                            containerpool.push(container_name),
+                            mains.send(MainMessage::Done { nid, det }),
+                        );
                     });
                     return;
                 }
@@ -370,8 +379,9 @@ async fn main() {
     let cpucnt = num_cpus::get();
     let jobsem = Arc::new(tokio::sync::Semaphore::new(cpucnt));
 
-    // setup fetch connection pool
-    let connpool = FetchConnPool::default();
+    // setup pools
+    let connpool = Pool::<FetchClient>::default();
+    let containerpool = Pool::<String>::default();
 
     {
         use std::time::Duration;
@@ -380,7 +390,7 @@ async fn main() {
         for _ in 0..cpucnt {
             connpool
                 .push(
-                    reqwest::Client::builder()
+                    FetchClient::builder()
                         .user_agent("Yzix 0.1 server")
                         .connect_timeout(cto)
                         .timeout(tow)
@@ -388,6 +398,7 @@ async fn main() {
                         .expect("unable to setup HTTP client"),
                 )
                 .await;
+            containerpool.push(format!("yzix-{}", random_name())).await;
         }
     }
 
@@ -494,6 +505,7 @@ async fn main() {
                         mains.clone(),
                         jobsem.clone(),
                         connpool.clone(),
+                        containerpool.clone(),
                         &mut graph,
                         nid,
                     )
@@ -619,6 +631,7 @@ async fn main() {
                                         mains.clone(),
                                         jobsem.clone(),
                                         connpool.clone(),
+                                        containerpool.clone(),
                                         &mut graph,
                                         nid2,
                                     )
@@ -637,6 +650,7 @@ async fn main() {
                                     mains.clone(),
                                     jobsem.clone(),
                                     connpool.clone(),
+                                    containerpool.clone(),
                                     &mut graph,
                                     nid,
                                 )

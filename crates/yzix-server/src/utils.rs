@@ -197,7 +197,7 @@ fn write_linux_ocirt_spec(
     )
 }
 
-fn random_name() -> String {
+pub fn random_name() -> String {
     use rand::prelude::*;
     let mut rng = rand::thread_rng();
     std::iter::repeat(())
@@ -208,6 +208,7 @@ fn random_name() -> String {
 
 pub async fn handle_process(
     config: &crate::ServerConfig,
+    container_name: &str,
     WorkItemRun {
         inhash,
         bldname,
@@ -252,7 +253,7 @@ pub async fn handle_process(
 
     use async_process::Stdio;
     let mut ch = Command::new(&config.container_runner)
-        .args(vec!["run".to_string(), format!("yzix-{}", random_name())])
+        .args(vec!["run".to_string(), container_name.to_string()])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
