@@ -84,6 +84,7 @@ make_strwrapper! { OutputName(outp) || "invalid output name"; {
 }}
 
 impl Default for OutputName {
+    #[inline]
     fn default() -> Self {
         Self("out".to_string())
     }

@@ -115,6 +115,23 @@ impl BuiltItem {
 
 const INPUT_REALISATION_DIR_POSTFIX: &str = ".in2";
 
+/// tries to resolve an input realisation 'cache' entry (`*.in2` paths in the store)
+/// * `target` should be the target read via `read_link`
+/// * `super_dir` should be the expected parent of the target
+fn resolve_in2_from_target(
+    target: std::path::PathBuf,
+    super_dir: &std::path::Path,
+) -> Option<StoreHash> {
+    let x = target;
+    if x.is_relative() && x.parent() == Some(super_dir) {
+        x.file_name()
+            .and_then(|x| x.to_str())
+            .and_then(|x| x.parse::<StoreHash>().ok())
+    } else {
+        None
+    }
+}
+
 async fn schedule(
     config: Arc<ServerConfig>,
     mains: Sender<MainMessage>,
@@ -137,60 +154,73 @@ async fn schedule(
             use build_graph::WorkItem as WI;
             let inhash = x.inputs_hash();
             if let Some(inhash) = inhash {
-                if let Ok(realis_iter) = std::fs::read_dir(
-                    config
-                        .store_path
-                        .join(format!("{}{}", inhash, INPUT_REALISATION_DIR_POSTFIX))
-                        .into_std_path_buf(),
-                ) {
-                    // determine list of necessary outputs
-                    // NOTE: we rely on the fact that no scheduling happens in parallel,
-                    // so we can assume no one observes that the output is already set
-                    // to scheduled, so that no additional graph is merged with the main one,
-                    // so that no additionally required outputs appear while we determine
-                    // the set of necessary outputs
-                    let super_dir = std::path::Path::new("..");
-                    // don't pessimize, read all available outputs
-                    let outputs: HashMap<_, _> = realis_iter
-                        .filter_map(|entry| {
-                            let entry = entry.ok()?;
-                            let name = entry
-                                .file_name()
-                                .to_str()
-                                .and_then(|filn| OutputName::new(filn.to_string()))?;
-                            let rp = std::fs::read_link(entry.path()).ok()?;
-                            Some((name, rp))
-                        })
-                        .filter(|(_, rp)| rp.is_relative() && rp.parent() == Some(super_dir))
-                        .filter_map(|(filn, rp)| {
-                            rp.file_name()
-                                .and_then(|rp| rp.to_str())
-                                .and_then(|rp| rp.parse::<StoreHash>().ok())
-                                .map(|outhash| (filn, (None, outhash)))
-                        })
-                        .collect();
+                use std::path::Path;
+                let realis_path = config
+                    .store_path
+                    .join(format!("{}{}", inhash, INPUT_REALISATION_DIR_POSTFIX))
+                    .into_std_path_buf();
 
-                    if graph
-                        .0
-                        .edges_directed(nid, Direction::Incoming)
-                        .map(|edge| &edge.weight().sel_output)
-                        .all(|sel_output| outputs.contains_key(&**sel_output))
-                    {
-                        // lucky case: we have found a valid shortcut!
-                        // do not submit the inhash to main, it would only try
-                        // to rewrite it, we don't want that.
-                        mains
-                            .send(MainMessage::Done {
-                                nid,
-                                det: Ok(Some(BuiltItem {
-                                    inhash: None,
-                                    outputs,
-                                })),
+                let outputs: HashMap<_, _> = tokio::task::block_in_place(|| {
+                    if let Ok(realis_iter) = std::fs::read_dir(&realis_path) {
+                        // determine list of necessary outputs
+                        // NOTE: we rely on the fact that no scheduling happens in parallel,
+                        // so we can assume no one observes that the output is already set
+                        // to scheduled, so that no additional graph is merged with the main one,
+                        // so that no additionally required outputs appear while we determine
+                        // the set of necessary outputs
+                        let super_dir = Path::new("..");
+                        // don't pessimize, read all available outputs
+                        let outputs: HashMap<_, _> = realis_iter
+                            .filter_map(|entry| {
+                                let entry = entry.ok()?;
+                                let name = entry
+                                    .file_name()
+                                    .to_str()
+                                    .and_then(|filn| OutputName::new(filn.to_string()))?;
+                                let rp = std::fs::read_link(entry.path()).ok()?;
+                                Some((name, rp))
                             })
-                            .await
-                            .unwrap();
-                        return;
+                            .filter_map(|(filn, rp)| {
+                                resolve_in2_from_target(rp, super_dir)
+                                    .map(|outhash| (filn, (None, outhash)))
+                            })
+                            .collect();
+
+                        if graph
+                            .0
+                            .edges_directed(nid, Direction::Incoming)
+                            .map(|edge| &edge.weight().sel_output)
+                            .all(|sel_output| outputs.contains_key(&**sel_output))
+                        {
+                            // this solves it for all dependees
+                            outputs
+                        } else {
+                            HashMap::new()
+                        }
+                    } else if let Ok(rp) = std::fs::read_link(&realis_path) {
+                        resolve_in2_from_target(rp, Path::new(""))
+                            .map(|outhash| (OutputName::default(), (None, outhash)))
+                            .into_iter()
+                            .collect()
+                    } else {
+                        HashMap::new()
                     }
+                });
+                if !outputs.is_empty() {
+                    // lucky case: we have found a valid input->output realisation/shortcut!
+                    // do not submit the inhash to main, it would only try
+                    // to rewrite it, we don't want that.
+                    mains
+                        .send(MainMessage::Done {
+                            nid,
+                            det: Ok(Some(BuiltItem {
+                                inhash: None,
+                                outputs,
+                            })),
+                        })
+                        .await
+                        .unwrap();
+                    return;
                 }
             }
             match x {
@@ -593,7 +623,8 @@ async fn main() {
                                 node.rest.output = Output::Failed(e.clone());
                                 push_response(node, ResponseKind::OutputNotify(Err(e))).await;
                                 success = false;
-                                break;
+                                // do not yet give up here
+                                //break;
                             }
                         }
 
@@ -602,7 +633,30 @@ async fn main() {
                                 .store_path
                                 .join(format!("{}{}", inhash, INPUT_REALISATION_DIR_POSTFIX));
                             // FIXME: how to deal with conflicting hashes?
-                            if let Err(e) = (Dump::Directory(syms)).write_to_path(
+
+                            // optimization, because the amount of subdirectories per directory
+                            // is really limited (e.g. ~64000 for ext4)
+                            // see also: https://ext4.wiki.kernel.org/index.php/Ext4_Howto#Sub_directory_scalability
+                            // so we omit creating a subdirectory if it would only contain
+                            // the 'out' (default output path) symlink
+                            let symdump = if syms.len() == 1 {
+                                if let Some(sym) = syms.remove(&*OutputName::default()) {
+                                    if let Dump::SymLink { target, to_dir } = sym {
+                                        Dump::SymLink {
+                                            target: Utf8PathBuf::from(target.file_name().unwrap()),
+                                            to_dir,
+                                        }
+                                    } else {
+                                        unreachable!("syms should only contain symlinks");
+                                    }
+                                } else {
+                                    Dump::Directory(syms)
+                                }
+                            } else {
+                                Dump::Directory(syms)
+                            };
+
+                            if let Err(e) = symdump.write_to_path(
                                 inpath.as_std_path(),
                                 DumpFlags {
                                     force: false,
