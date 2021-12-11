@@ -1,3 +1,5 @@
+use base64::engine::fast_portable::{FastPortable, FastPortableConfig};
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::{convert, fmt};
 
@@ -12,11 +14,25 @@ const HASH_LEN: usize = 32;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
 pub struct Hash(pub [u8; HASH_LEN]);
 
-const B64_CFG: base64::Config = base64::URL_SAFE_NO_PAD;
+static B64_ALPHABET: Lazy<base64::alphabet::Alphabet> = Lazy::new(|| {
+    // base64, like URL_SAFE, but '-' is replaced with '+' for better interaction
+    // with shell programs, which don't like file names which start with '-'
+    base64::alphabet::Alphabet::from_str(
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+_",
+    )
+    .unwrap()
+});
+
+static B64_ENGINE: Lazy<FastPortable> = Lazy::new(|| {
+    FastPortable::from(
+        &*B64_ALPHABET,
+        FastPortableConfig::new().with_encode_padding(false),
+    )
+});
 
 impl fmt::Display for Hash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&base64::encode_config(self.0, B64_CFG))
+        f.write_str(&base64::encode_engine(self.0, &*B64_ENGINE))
     }
 }
 
@@ -24,7 +40,7 @@ impl std::str::FromStr for Hash {
     type Err = base64::DecodeError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(Self(
-            base64::decode_config(s, B64_CFG)?
+            base64::decode_engine(s, &*B64_ENGINE)?
                 .try_into()
                 .map_err(|_| base64::DecodeError::InvalidLength)?,
         ))
