@@ -1,6 +1,5 @@
 use crate::{BuiltItem, LogFwdMessage, NodeMeta, WorkItemRun};
 use async_channel::{Receiver, Sender};
-use async_process::Command;
 use futures_util::StreamExt;
 use std::collections::HashSet;
 use std::{future::Future, marker::Unpin, path::Path, sync::Arc};
@@ -43,33 +42,33 @@ pub fn push_response(
     )
 }
 
-async fn handle_logging_to_intermed<T: futures_util::io::AsyncRead + Unpin>(
+async fn handle_logging_to_intermed<T: tokio::io::AsyncRead + Unpin>(
     log: Sender<String>,
     pipe: T,
-) {
-    use futures_util::io::{AsyncBufReadExt, BufReader};
+) -> std::io::Result<()> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
     let mut stream = BufReader::new(pipe).lines();
-    while let Some(content) = stream.next().await {
-        let content = match content {
-            Ok(x) => x,
-            // TODO: give the client a proper error serialization
-            Err(e) => format!("I/O error: {}", e),
-        };
+    while let Some(content) = stream.next_line().await? {
         if log.send(content).await.is_err() {
             break;
         }
     }
+    Ok(())
 }
 
 async fn handle_logging_to_file(mut linp: Receiver<String>, loutp: &Path) -> std::io::Result<()> {
     use tokio::io::AsyncWriteExt;
-    let mut fout = async_compression::tokio::write::ZstdEncoder::with_quality(tokio::fs::File::create(loutp).await?, async_compression::Level::Best);
+    let mut fout = async_compression::tokio::write::ZstdEncoder::with_quality(
+        tokio::fs::File::create(loutp).await?,
+        async_compression::Level::Best,
+    );
     while let Some(mut content) = linp.next().await {
         content.push('\n');
         fout.write_all(content.as_bytes()).await?;
     }
     fout.flush().await?;
     fout.shutdown().await?;
+    Ok(())
 }
 
 fn write_linux_ocirt_spec(
@@ -253,8 +252,8 @@ pub async fn handle_process(
         need_store_mount,
     )?;
 
-    use async_process::Stdio;
-    let mut ch = Command::new(&config.container_runner)
+    use std::process::Stdio;
+    let mut ch = tokio::process::Command::new(&config.container_runner)
         .args(vec![
             "--root".to_string(),
             config.store_path.join(".runc").into_string(),
@@ -271,7 +270,7 @@ pub async fn handle_process(
     let y = handle_logging_to_intermed(logfwds, ch.stderr.take().unwrap());
     let z = handle_logging_to_file(logfwdr, logoutput.as_std_path());
 
-    let (_, _, z, exs) = tokio::join!(x, y, z, ch.status());
+    let (_, _, z, exs) = tokio::join!(x, y, z, ch.wait());
     let (_, exs) = (z?, exs?);
     if exs.success() {
         Ok(BuiltItem {
@@ -308,9 +307,11 @@ pub async fn read_graph_from_store(
 ) -> Result<build_graph::Graph<()>, OutputError> {
     let real_path = store_path.join(outhash.to_string()).into_std_path_buf();
     Ok(serde_json::from_str(
-        &tokio::fs::read_to_string(&real_path).await.map_err(|e| yzix_core::store::Error {
-            real_path,
-            kind: e.into(),
-        })?,
+        &tokio::fs::read_to_string(&real_path)
+            .await
+            .map_err(|e| yzix_core::store::Error {
+                real_path,
+                kind: e.into(),
+            })?,
     )?)
 }
