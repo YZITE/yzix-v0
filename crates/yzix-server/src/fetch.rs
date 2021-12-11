@@ -7,15 +7,14 @@ pub async fn mangle_result(
     r: Result<reqwest::Response, reqwest::Error>,
     expect_hash: Option<StoreHash>,
 ) -> Result<BuiltItem, OutputError> {
-    println!("fetch {}", url);
     let r = r?;
     let rstat = r.status();
 
     if !rstat.is_success() {
         return Err(OutputError::FetchFailed {
+            msg: format!("fetching of url ({}) failed with HTTP error {}", url, rstat),
             url: Some(url),
             status: Some(rstat.as_u16()),
-            msg: rstat.to_string(),
         });
     }
 

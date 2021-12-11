@@ -118,7 +118,7 @@ pub enum OutputError {
     #[error("invalid URL for fetch: {0}")]
     InvalidUrl(Url),
 
-    #[error("fetch of {url:?} failed with {msg}")]
+    #[error("{msg}")]
     FetchFailed {
         url: Option<Url>,
         status: Option<u16>,

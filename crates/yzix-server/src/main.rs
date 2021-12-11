@@ -247,9 +247,10 @@ async fn schedule(
                     } else {
                         let connpool = connpool.clone();
                         tokio::spawn(async move {
+                            println!("\rfetch {}", url);
                             let client = connpool.pop().await;
                             let resp = client.get(url.clone()).send().await;
-                            let _ = connpool.push(client).await;
+                            connpool.push(client).await;
                             let _ = mains
                                 .send(MainMessage::Done {
                                     nid,
