@@ -1,2 +1,6 @@
 [workspace]
 members = ["crates/*"]
+
+[profile.release]
+codegen-units = 8
+lto = "thin"
