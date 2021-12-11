@@ -741,16 +741,13 @@ async fn main() {
             })
             .collect::<Vec<_>>()
             .into_iter()
+            .inspect(|_| print!("."))
             .map(|i| graph.0.remove_node(i))
             .count();
-        if cnt > 0 {
-            // DEBUG
-            println!("pruned {} node(s)", cnt);
-            if graph.0.node_count() == 0 {
-                // reset to reclaim memory
-                println!("reset to reclaim memory");
-                graph.0 = Default::default();
-            }
+        if cnt > 0 && graph.0.node_count() == 0 {
+            // reset to reclaim memory
+            println!("reset to reclaim memory");
+            graph.0 = Default::default();
         }
     }
 }
