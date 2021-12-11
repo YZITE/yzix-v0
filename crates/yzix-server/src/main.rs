@@ -267,7 +267,7 @@ async fn schedule(
                     let store_path = config.store_path.clone();
                     let mains = mains.clone();
                     tokio::spawn(async move {
-                        let det = match read_graph_from_store(&store_path, outhash) {
+                        let det = match read_graph_from_store(&store_path, outhash).await {
                             Ok(graph) => {
                                 let _ = mains
                                     .send(MainMessage::Schedule {

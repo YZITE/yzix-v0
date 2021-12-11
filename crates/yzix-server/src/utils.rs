@@ -302,17 +302,15 @@ pub async fn handle_process(
     }
 }
 
-pub fn read_graph_from_store(
+pub async fn read_graph_from_store(
     store_path: &Utf8Path,
     outhash: StoreHash,
 ) -> Result<build_graph::Graph<()>, OutputError> {
-    tokio::task::block_in_place(|| {
-        let real_path = store_path.join(outhash.to_string()).into_std_path_buf();
-        Ok(serde_json::from_str(
-            &std::fs::read_to_string(&real_path).map_err(|e| yzix_core::store::Error {
-                real_path,
-                kind: e.into(),
-            })?,
-        )?)
-    })
+    let real_path = store_path.join(outhash.to_string()).into_std_path_buf();
+    Ok(serde_json::from_str(
+        &tokio::fs::read_to_string(&real_path).await.map_err(|e| yzix_core::store::Error {
+            real_path,
+            kind: e.into(),
+        })?,
+    )?)
 }
