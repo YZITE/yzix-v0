@@ -34,7 +34,6 @@ pub fn push_response(
     n: &mut build_graph::Node<NodeMeta>,
     kind: ResponseKind,
 ) -> impl Future<Output = ()> + '_ {
-    println!("push_response: {:?} {:?}", n, kind);
     log_to_bunch(
         &mut n.rest.log,
         LogFwdMessage::Response(Arc::new(Response {
