@@ -1,5 +1,6 @@
 use crate::BuiltItem;
 use yzix_core::store::{Dump, Hash as StoreHash};
+use yzix_core::tracing::error;
 use yzix_core::OutputError;
 
 pub async fn mangle_result(
@@ -11,6 +12,7 @@ pub async fn mangle_result(
     let rstat = r.status();
 
     if !rstat.is_success() {
+        error!(url = %url, "fetching failed with HTTP error {}", rstat);
         return Err(OutputError::FetchFailed {
             msg: format!("fetching of url ({}) failed with HTTP error {}", url, rstat),
             url: Some(url),

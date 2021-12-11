@@ -13,6 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use yzix_core::build_graph::{self, Direction, EdgeRef, NodeIndex};
 use yzix_core::store::{Dump, Flags as DumpFlags, Hash as StoreHash};
+use yzix_core::tracing::error;
 use yzix_core::{OutputError, OutputName, Response, ResponseKind, Utf8Path, Utf8PathBuf};
 use yzix_pool::Pool;
 
@@ -397,6 +398,9 @@ async fn main() {
     };
     let config = Arc::new(config);
 
+    // install global subscriber configured based on RUST_LOG envvar.
+    tracing_subscriber::fmt::init();
+
     std::fs::create_dir_all(&config.store_path).expect("unable to create store dir");
 
     let cpucnt = num_cpus::get();
@@ -561,15 +565,9 @@ async fn main() {
                                                 let on_disk_hash =
                                                     StoreHash::hash_complex(&on_disk_dump);
                                                 if on_disk_hash != *outhash {
-                                                    eprintln!(
-                                                        "ERROR: detected data corruption @ {}",
-                                                        outhash
-                                                    );
+                                                    error!(outhash = %outhash, "detected data corruption");
                                                 } else if on_disk_dump != *dump {
-                                                    eprintln!(
-                                                        "ERROR: detected hash collision @ {}",
-                                                        outhash
-                                                    );
+                                                    error!(outhash = %outhash, "detected hash collision");
                                                     err_output = Some(OutputError::HashCollision(
                                                         on_disk_hash,
                                                     ));
@@ -579,10 +577,7 @@ async fn main() {
                                                 }
                                             }
                                             Err(e) => {
-                                                eprintln!(
-                                                    "ERROR: while dumping @ {}: {}",
-                                                    outhash, e
-                                                );
+                                                error!(outhash = %outhash, "while dumping: {}", e);
                                             }
                                         }
                                     } else {
@@ -597,7 +592,7 @@ async fn main() {
                                             make_readonly: true,
                                         },
                                     ) {
-                                        eprintln!("ERROR: {}", e);
+                                        error!("{}", e);
                                         err_output = Some(e.into());
                                     }
                                 }
@@ -664,7 +659,7 @@ async fn main() {
                                 },
                             ) {
                                 // this is just caching, non-fatal
-                                eprintln!("realisation write ERROR: {}", e);
+                                error!("realisation write ERROR (this breaks caching): {}", e);
                             }
                         }
 
@@ -729,7 +724,7 @@ async fn main() {
                             bldname: node.name.clone(),
                             content: format!("ERROR: {}", oe),
                         };
-                        eprintln!("{}: ERROR: {}", node.name, oe);
+                        error!(bldname = %node.name, "{}", oe);
                         node.rest.output = Output::Failed(oe);
                         push_response(node, rk).await;
                     }

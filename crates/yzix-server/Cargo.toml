@@ -15,6 +15,7 @@ serde_json = "1.0"
 tempfile = "3.2"
 thiserror = "1.0"
 toml = "0.5"
+tracing-subscriber = "0.3"
 
 [dependencies.async-compression]
 version = "0.3"
@@ -43,7 +44,7 @@ features = [
 
 [dependencies.yzix-core]
 path = "../yzix-core"
-features = ["reqwest", "serde_json"]
+features = ["reqwest", "serde_json", "tracing"]
 
 [dependencies.yzix-pool]
 path = "../yzix-pool"

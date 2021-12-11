@@ -12,6 +12,10 @@ pub use crate::strwrappers::OutputName;
 
 pub use camino::{Utf8Path, Utf8PathBuf};
 pub use ciborium;
+
+#[cfg(feature = "tracing")]
+pub use tracing;
+
 pub use url::Url;
 pub use yzix_store as store;
 

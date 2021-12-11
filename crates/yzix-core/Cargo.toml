@@ -35,6 +35,10 @@ version = "1.0"
 default-features = false
 optional = true
 
+[dependencies.tracing]
+version = "0.1"
+optional = true
+
 [dependencies.url]
 version = "2.2"
 features = ["serde"]
