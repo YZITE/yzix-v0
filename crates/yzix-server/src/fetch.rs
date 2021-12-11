@@ -7,6 +7,7 @@ pub async fn mangle_result(
     r: Result<reqwest::Response, reqwest::Error>,
     expect_hash: Option<StoreHash>,
 ) -> Result<BuiltItem, OutputError> {
+    println!("fetch {}", url);
     let r = r?;
     let rstat = r.status();
 
