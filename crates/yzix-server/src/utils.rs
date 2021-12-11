@@ -68,7 +68,8 @@ async fn handle_logging_to_file(mut linp: Receiver<String>, loutp: &Path) -> std
         content.push('\n');
         fout.write_all(content.as_bytes()).await?;
     }
-    fout.flush().await
+    fout.flush().await?;
+    fout.shutdown().await?;
 }
 
 fn write_linux_ocirt_spec(
