@@ -75,11 +75,13 @@ impl fmt::Display for ResponseKind {
                 write!(f, "[DUMP] {:?}", dump)
             }
             RK::OutputNotify(Ok(outputs)) => {
+                let mut isfi = true;
                 for (key, outhash) in outputs {
-                    write!(f, "\t{}->{}", key, outhash)?;
-                    if f.alternate() {
+                    if !isfi && f.alternate() {
                         writeln!(f)?;
                     }
+                    isfi = false;
+                    write!(f, "\t{}->{}", key, outhash)?;
                 }
                 Ok(())
             }
