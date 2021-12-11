@@ -73,9 +73,10 @@ macro_rules! make_strwrapper {
 }
 
 make_strwrapper! { OutputName(outp) || "invalid output name"; {
-    if outp.is_empty() || outp.contains(|i: char| {
+    let is_illegal = |i: char| {
         !i.is_ascii_alphanumeric() && !matches!(i, '_' | '-' | '.')
-    }) {
+    };
+    if outp.is_empty() || outp.contains(is_illegal) {
         None
     } else {
         Some(Self(outp))
