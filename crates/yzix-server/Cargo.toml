@@ -17,6 +17,10 @@ tempfile = "3.2"
 thiserror = "1.0"
 toml = "0.5"
 
+[dependencies.async-compression]
+version = "0.3"
+features = ["tokio", "zstd"]
+
 [dependencies.futures-util]
 version = "0.3"
 features = ["io"]

@@ -63,13 +63,12 @@ async fn handle_logging_to_intermed<T: futures_util::io::AsyncRead + Unpin>(
 
 async fn handle_logging_to_file(mut linp: Receiver<String>, loutp: &Path) -> std::io::Result<()> {
     use tokio::io::AsyncWriteExt;
-    let mut fout = tokio::fs::File::create(loutp).await?;
-    while let Some(content) = linp.next().await {
+    let mut fout = async_compression::tokio::write::ZstdEncoder::with_quality(tokio::fs::File::create(loutp).await?, async_compression::Level::Best);
+    while let Some(mut content) = linp.next().await {
+        content.push('\n');
         fout.write_all(content.as_bytes()).await?;
-        fout.write_all(b"\n").await?;
     }
-    fout.flush().await?;
-    Ok(())
+    fout.flush().await
 }
 
 fn write_linux_ocirt_spec(
@@ -215,7 +214,7 @@ pub async fn handle_process(
 ) -> Result<BuiltItem, OutputError> {
     let workdir = tempfile::tempdir()?;
     let rootdir = workdir.path().join("rootfs");
-    let logoutput = config.store_path.join(format!("{}.log", inhash));
+    let logoutput = config.store_path.join(format!("{}.log.zst", inhash));
 
     let extra_env = if let Some(new_root) = new_root {
         tokio::task::block_in_place(|| {
