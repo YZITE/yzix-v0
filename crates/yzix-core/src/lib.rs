@@ -24,7 +24,7 @@ use crate::{
     store::{Dump, Hash as StoreHash},
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fmt};
+use std::{collections::HashMap, fmt, sync::Arc};
 
 pub type Length = u64;
 
@@ -64,7 +64,7 @@ pub struct Response {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum ResponseKind {
     LogLine { bldname: String, content: String },
-    Dump(Dump),
+    Dump(Arc<Dump>),
     OutputNotify(Result<HashMap<OutputName, StoreHash>, OutputError>),
 }
 

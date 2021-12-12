@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
 
 /// sort-of emulation of NAR using CBOR
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase", tag = "type")]
 pub enum Dump {
     Regular { executable: bool, contents: Vec<u8> },
@@ -38,19 +38,23 @@ impl Dump {
         let meta = fs::symlink_metadata(x).map_err(&mapef)?;
         let ty = meta.file_type();
         Ok(if ty.is_symlink() {
-            let target = fs::read_link(x)
-                .map_err(&mapef)?
-                .try_into()
-                .map_err(|_| Error {
-                    real_path: x.to_path_buf(),
-                    kind: ErrorKind::NonUtf8SymlinkTarget,
-                })?;
+            let mut target: Utf8PathBuf =
+                fs::read_link(x)
+                    .map_err(&mapef)?
+                    .try_into()
+                    .map_err(|_| Error {
+                        real_path: x.to_path_buf(),
+                        kind: ErrorKind::NonUtf8SymlinkTarget,
+                    })?;
+            target.shrink_to_fit();
             Dump::SymLink { target }
         } else if ty.is_file() {
+            let mut contents = std::fs::read(x).map_err(&mapef)?;
+            contents.shrink_to_fit();
             Dump::Regular {
                 executable: std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o111
                     != 0,
-                contents: std::fs::read(x).map_err(&mapef)?,
+                contents,
             }
         } else if ty.is_dir() {
             Dump::Directory(

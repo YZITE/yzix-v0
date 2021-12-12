@@ -6,7 +6,7 @@
     unused_must_use
 )]
 
-use async_channel::{unbounded, Sender};
+use async_channel::{unbounded, bounded, Sender};
 use reqwest::Client as FetchClient;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -327,11 +327,12 @@ async fn schedule(
                         Ok(dat) => {
                             let dump = Dump::Directory(dat);
                             let outhash = StoreHash::hash_complex(&dump);
+                            let dump = Arc::new(dump);
                             push_response(&mut graph.0[nid], ResponseKind::Dump(dump.clone()))
                                 .await;
                             Ok(Some(BuiltItem::with_single(
                                 inhash,
-                                Some(Arc::new(dump)),
+                                Some(dump),
                                 outhash,
                             )))
                         }
@@ -430,6 +431,7 @@ async fn main() {
     // running or older tasks. (invariant)
     // we manage the graph in the main thread, it is !Sync+!Send
 
+    // this queue needs to be unbounded, otherwise the main thread could block itself...
     let (mains, mainr) = unbounded();
     let mut graph = build_graph::Graph::default();
 
@@ -444,7 +446,7 @@ async fn main() {
     // handle log forwarding
     let mut logwbearer = HashMap::<String, Sender<LogFwdMessage>>::new();
     for i in &config.bearer_tokens {
-        let (logs, logr) = unbounded();
+        let (logs, logr) = bounded(1000);
         logwbearer.insert(i.clone(), logs);
         tokio::spawn(async move {
             let mut subs = Vec::new();
@@ -485,7 +487,7 @@ async fn main() {
                     // the logs (this is also the recommended approach).
                     bearer_auth.clone(),
                     if opts.attach_to_logs {
-                        let (logs, logr) = unbounded();
+                        let (logs, logr) = bounded(1000);
                         logwbearer[&*bearer_auth]
                             .send(LogFwdMessage::Subscribe(logs))
                             .await
@@ -534,7 +536,8 @@ async fn main() {
             MM::Done { nid, det } => {
                 use yzix_core::tracing::{span, Level};
                 let mut node = &mut graph.0[nid];
-                let span = span!(Level::INFO, "Done", ?nid, bldname = %node.name, tag = %node.logtag);
+                let span =
+                    span!(Level::INFO, "Done", ?nid, bldname = %node.name, tag = %node.logtag);
                 let _guard = span.enter();
                 match det {
                     Ok(Some(BuiltItem { inhash, outputs })) => {
@@ -789,12 +792,11 @@ async fn main() {
             })
             .collect::<Vec<_>>()
             .into_iter()
-            .inspect(|_| print!("."))
             .map(|i| graph.0.remove_node(i))
             .count();
         if cnt > 0 && graph.0.node_count() == 0 {
             // reset to reclaim memory
-            println!("reset to reclaim memory");
+            info!("reset to reclaim memory");
             graph.0 = Default::default();
         }
     }
