@@ -129,19 +129,31 @@ impl BuiltItem {
 
 const INPUT_REALISATION_DIR_POSTFIX: &str = ".in2";
 
-type InHashExclusive = HashMap<StoreHash, HashSet<NodeIndex>>;
+type InHashExclusive = HashMap<StoreHash, NodeIndex>;
 
 // if this returns true, continue, otherwise exit
-fn inhxcl_setup(inhxcl: &mut InHashExclusive, inhash: StoreHash, nid: NodeIndex) -> bool {
-    let mut was_present = true;
-    inhxcl
-        .entry(inhash)
-        .or_insert_with(|| {
-            was_present = false;
-            HashSet::new()
-        })
-        .insert(nid);
-    !was_present
+fn inhxcl_setup(
+    inhxcl: &mut InHashExclusive,
+    graph: &mut build_graph::Graph<NodeMeta>,
+    inhash: StoreHash,
+    nid: NodeIndex,
+) -> bool {
+    use std::collections::hash_map::Entry;
+    match inhxcl.entry(inhash) {
+        Entry::Vacant(v) => {
+            v.insert(nid);
+            true
+        }
+        Entry::Occupied(occ) => {
+            let orig_nid = *occ.get();
+            // FIXME: how to deal with logtags here?
+            yzix_core::tracing::trace!("merge graph nodes {:?} <- {:?}", orig_nid, nid);
+            let afflog = std::mem::take(&mut graph.0[nid].rest.log);
+            graph.0[orig_nid].rest.log.extend(afflog);
+            graph.replace_node(nid, orig_nid);
+            false
+        }
+    }
 }
 
 async fn schedule(
@@ -246,7 +258,7 @@ async fn schedule(
                     let jobsem = jobsem.clone();
                     let containerpool = containerpool.clone();
                     let mains = mains.clone();
-                    if inhxcl_setup(inhash_exclusive, inhash, nid) {
+                    if inhxcl_setup(inhash_exclusive, graph, inhash, nid) {
                         tokio::spawn(async move {
                             let _job = jobsem.acquire().await;
                             let container_name = containerpool.pop().await;
@@ -711,25 +723,16 @@ async fn main() {
                     }
                 }
 
-                let extra_affected_nids = if let Some(inhash) = maybe_inhash {
-                    if let Some(mut aff) = inhash_exclusive.remove(&inhash) {
-                        let x = aff.remove(&nid);
-                        assert!(x);
-                        aff
-                    } else {
-                        // because a single nid should only ever be scheduled once
-                        // at a time, and no nid should be supplied to multiple entries
-                        // in the hashmap, we are done with checking here.
-                        HashSet::new()
+                if let Some(inhash) = maybe_inhash {
+                    if let Some(aff) = inhash_exclusive.remove(&inhash) {
+                        assert_eq!(aff, nid);
                     }
                 } else {
-                    let mut affidx = HashSet::new();
                     let mut inhashes = HashSet::new();
                     inhash_exclusive.retain(|k, v| {
-                        let reti = v.contains(&nid);
+                        let reti = *v == nid;
                         if reti {
-                            affidx.extend(std::mem::take(v));
-                            inhashes.insert(k.to_string());
+                            inhashes.insert(*k);
                         }
                         !reti
                     });
@@ -739,20 +742,7 @@ async fn main() {
                         }
                         panic!("INTERNAL ERROR: node was scheduled via multiple inhashes");
                     }
-                    affidx.remove(&nid);
-                    affidx
                 };
-
-                {
-                    let mut log = std::mem::take(&mut graph.0[nid].rest.log);
-                    for nid2 in extra_affected_nids {
-                        // FIXME: how to deal with logtags here?
-                        yzix_core::tracing::trace!("merge graph nodes {:?} <- {:?}", nid, nid2);
-                        log.extend(std::mem::take(&mut graph.0[nid2].rest.log));
-                        graph.replace_node(nid2, nid);
-                    }
-                    graph.0[nid].rest.log = log;
-                }
 
                 let result = match &graph.0[nid].rest.output {
                     Output::Success(outputs) => {
