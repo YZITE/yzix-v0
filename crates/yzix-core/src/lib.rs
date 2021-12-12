@@ -90,7 +90,7 @@ impl fmt::Display for ResponseKind {
                 Ok(())
             }
             RK::OutputNotify(Err(oe)) => {
-                write!(f, "[ERROR] {:?}", oe)
+                write!(f, "[ERROR] {}", oe)
             }
         }
     }
