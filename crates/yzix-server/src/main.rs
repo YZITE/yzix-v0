@@ -13,14 +13,16 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use yzix_core::build_graph::{self, Direction, EdgeRef, NodeIndex};
 use yzix_core::store::{Dump, Flags as DumpFlags, Hash as StoreHash};
-use yzix_core::tracing::error;
-use yzix_core::{OutputError, OutputName, Response, ResponseKind, Utf8Path, Utf8PathBuf};
+use yzix_core::tracing::{error, info};
+use yzix_core::{OutputError, OutputName, Response, ResponseKind, Utf8PathBuf};
 use yzix_pool::Pool;
 
 mod clients;
 use clients::{handle_client_io, handle_clients_initial};
 mod fetch;
 use fetch::mangle_result as mangle_fetch_result;
+mod in2_helpers;
+use in2_helpers::{create_in2_symlinks_bunch, resolve_in2_from_target};
 mod utils;
 use utils::*;
 
@@ -52,6 +54,17 @@ pub enum LogFwdMessage {
 pub struct NodeMeta {
     output: Output,
     log: Vec<Sender<LogFwdMessage>>,
+    reschedule: bool,
+}
+
+impl Default for NodeMeta {
+    fn default() -> Self {
+        Self {
+            output: Output::NotStarted,
+            log: vec![],
+            reschedule: false,
+        }
+    }
 }
 
 impl build_graph::ReadOutHash for NodeMeta {
@@ -116,23 +129,6 @@ impl BuiltItem {
 
 const INPUT_REALISATION_DIR_POSTFIX: &str = ".in2";
 
-/// tries to resolve an input realisation 'cache' entry (`*.in2` paths in the store)
-/// * `target` should be the target read via `read_link`
-/// * `super_dir` should be the expected parent of the target
-fn resolve_in2_from_target(
-    target: std::path::PathBuf,
-    super_dir: &std::path::Path,
-) -> Option<StoreHash> {
-    let x = target;
-    if x.is_relative() && x.parent() == Some(super_dir) {
-        x.file_name()
-            .and_then(|x| x.to_str())
-            .and_then(|x| x.parse::<StoreHash>().ok())
-    } else {
-        None
-    }
-}
-
 async fn schedule(
     config: Arc<ServerConfig>,
     mains: Sender<MainMessage>,
@@ -162,7 +158,12 @@ async fn schedule(
                     .into_std_path_buf();
 
                 let outputs: HashMap<_, _> = tokio::task::block_in_place(|| {
-                    if let Ok(realis_iter) = std::fs::read_dir(&realis_path) {
+                    if let Ok(rp) = std::fs::read_link(&realis_path) {
+                        resolve_in2_from_target(rp, Path::new(""))
+                            .map(|outhash| (OutputName::default(), (None, outhash)))
+                            .into_iter()
+                            .collect()
+                    } else if let Ok(realis_iter) = std::fs::read_dir(&realis_path) {
                         // determine list of necessary outputs
                         // NOTE: we rely on the fact that no scheduling happens in parallel,
                         // so we can assume no one observes that the output is already set
@@ -171,7 +172,7 @@ async fn schedule(
                         // the set of necessary outputs
                         let super_dir = Path::new("..");
                         // don't pessimize, read all available outputs
-                        let outputs: HashMap<_, _> = realis_iter
+                        realis_iter
                             .filter_map(|entry| {
                                 let entry = entry.ok()?;
                                 let name = entry
@@ -185,43 +186,35 @@ async fn schedule(
                                 resolve_in2_from_target(rp, super_dir)
                                     .map(|outhash| (filn, (None, outhash)))
                             })
-                            .collect();
-
-                        if graph
-                            .0
-                            .edges_directed(nid, Direction::Incoming)
-                            .map(|edge| &edge.weight().sel_output)
-                            .all(|sel_output| outputs.contains_key(&**sel_output))
-                        {
-                            // this solves it for all dependees
-                            outputs
-                        } else {
-                            HashMap::new()
-                        }
-                    } else if let Ok(rp) = std::fs::read_link(&realis_path) {
-                        resolve_in2_from_target(rp, Path::new(""))
-                            .map(|outhash| (OutputName::default(), (None, outhash)))
-                            .into_iter()
                             .collect()
                     } else {
                         HashMap::new()
                     }
                 });
                 if !outputs.is_empty() {
-                    // lucky case: we have found a valid input->output realisation/shortcut!
-                    // do not submit the inhash to main, it would only try
-                    // to rewrite it, we don't want that.
-                    mains
-                        .send(MainMessage::Done {
-                            nid,
-                            det: Ok(Some(BuiltItem {
-                                inhash: None,
-                                outputs,
-                            })),
-                        })
-                        .await
-                        .unwrap();
-                    return;
+                    if !graph.0[nid].rest.reschedule {
+                        // make sure that we don't end up in an endless loop
+                        graph.0[nid].rest.reschedule = true;
+                        // lucky case: we have found a valid input->output realisation/shortcut!
+                        // do not submit the inhash to main, it would only try
+                        // to rewrite it, we don't want that.
+                        // if we don't have all necessary outputs, then
+                        // we will get rescheduled and thanks to the check above
+                        // this won't lead to an endless loop
+                        mains
+                            .send(MainMessage::Done {
+                                nid,
+                                det: Ok(Some(BuiltItem {
+                                    inhash: None,
+                                    outputs,
+                                })),
+                            })
+                            .await
+                            .unwrap();
+                        return;
+                    } else {
+                        info!(%inhash, "cached entry rejected (rescheduled)");
+                    }
                 }
             }
             match x {
@@ -517,20 +510,13 @@ async fn main() {
                     graph.take_and_merge(
                         graph2,
                         |()| NodeMeta {
-                            output: Output::NotStarted,
                             log: log.clone(),
+                            ..NodeMeta::default()
                         },
                         |noder| noder.log.extend(log.clone()),
                     )
                 } else {
-                    graph.take_and_merge(
-                        graph2,
-                        |()| NodeMeta {
-                            output: Output::NotStarted,
-                            log: vec![],
-                        },
-                        |_| {},
-                    )
+                    graph.take_and_merge(graph2, |()| NodeMeta::default(), |_| {})
                 };
                 for (_, nid) in trt {
                     schedule(
@@ -550,7 +536,7 @@ async fn main() {
                 match det {
                     Ok(Some(BuiltItem { inhash, outputs })) => {
                         let mut success = true;
-                        let mut syms = std::collections::BTreeMap::new();
+                        let mut syms = HashMap::new();
                         for (outname, (dump, outhash)) in &outputs {
                             let ohs = outhash.to_string();
                             let dstpath = config.store_path.join(&ohs).into_std_path_buf();
@@ -598,8 +584,7 @@ async fn main() {
                                 }
 
                                 if err_output.is_none() {
-                                    let target = Utf8Path::new("..").join(outhash.to_string());
-                                    syms.insert(outname.clone().into(), Dump::SymLink { target });
+                                    syms.insert(outname.clone().into(), outhash.to_string());
                                 }
                             }
                             if err_output.is_none() && !dstpath.exists() {
@@ -626,31 +611,63 @@ async fn main() {
                             // see also: https://ext4.wiki.kernel.org/index.php/Ext4_Howto#Sub_directory_scalability
                             // so we omit creating a subdirectory if it would only contain
                             // the 'out' (default output path) symlink
-                            let symdump = if syms.len() == 1 {
-                                if let Some(sym) = syms.remove(&*OutputName::default()) {
-                                    if let Dump::SymLink { target } = sym {
-                                        Dump::SymLink {
-                                            target: Utf8PathBuf::from(target.file_name().unwrap()),
+
+                            // this is caching, if it fails,
+                            //    it's non-fatal for the node, but a big error for the server
+
+                            let mut create_bunch = false;
+                            if syms.len() == 1 {
+                                if let Some(target) = syms.remove(&*OutputName::default()) {
+                                    // check if the link target stays the same
+                                    match std::fs::read_link(inpath.as_std_path()) {
+                                        Ok(oldtrg) if oldtrg == std::path::Path::new(&target) => {}
+                                        Err(erl) if erl.kind() == std::io::ErrorKind::NotFound => {
+                                            if let Err(e) = std::os::unix::fs::symlink(
+                                                &target,
+                                                inpath.as_std_path(),
+                                            ) {
+                                                error!(
+                                                    %inpath,
+                                                    ?target,
+                                                    "realisation write (this breaks caching): {}", e
+                                                );
+                                            }
                                         }
-                                    } else {
-                                        unreachable!("syms should only contain symlinks");
+                                        Ok(orig_target) => {
+                                            error!(
+                                                %inpath,
+                                                ?orig_target,
+                                                ?target,
+                                                "realisation write (this breaks caching): outname differs"
+                                            );
+                                        }
+                                        Err(e) => {
+                                            error!(
+                                                %inpath,
+                                                ?target,
+                                                "realisation write blocked (this breaks caching): {}", e
+                                            );
+                                        }
                                     }
+                                    // usually, you can't mark a symlink read-only
                                 } else {
-                                    Dump::Directory(syms)
+                                    create_bunch = true;
                                 }
                             } else {
-                                Dump::Directory(syms)
-                            };
+                                create_bunch = true;
+                            }
 
-                            if let Err(e) = symdump.write_to_path(
-                                inpath.as_std_path(),
-                                DumpFlags {
-                                    force: false,
-                                    make_readonly: true,
-                                },
-                            ) {
-                                // this is just caching, non-fatal
-                                error!("realisation write ERROR (this breaks caching): {}", e);
+                            if create_bunch {
+                                if let Err(e) =
+                                    create_in2_symlinks_bunch(inpath.as_std_path(), &syms)
+                                {
+                                    error!(
+                                        %inpath,
+                                        ?syms,
+                                        "realisation write ERROR (this breaks caching): {}",
+                                        e
+                                    );
+                                }
                             }
                         }
 
@@ -664,6 +681,7 @@ async fn main() {
 
                             // schedule now available jobs
                             let outputs: HashSet<_> = outputs.into_iter().map(|(i, _)| i).collect();
+                            let reschedule_allowed = graph.0[nid].rest.reschedule;
                             let mut reschedule = false;
                             let mut per_nid_necouts = HashMap::<_, HashSet<_>>::new();
                             for edge in graph.0.edges_directed(nid, Direction::Incoming) {
@@ -673,8 +691,10 @@ async fn main() {
                                     .insert(edge.weight().sel_output.clone());
                             }
                             for (nid2, necouts) in per_nid_necouts {
-                                if necouts.is_subset(&outputs) {
-                                    debug_assert!(necouts.len() < outputs.len());
+                                if necouts.is_subset(&outputs) || !reschedule_allowed {
+                                    // if no reschedule is allowed,
+                                    // then this marks nid2 as failed
+                                    // (because the input is unavailable)
                                     schedule(
                                         config.clone(),
                                         mains.clone(),
@@ -693,6 +713,7 @@ async fn main() {
                                 }
                             }
                             if reschedule {
+                                assert!(reschedule_allowed);
                                 graph.0[nid].rest.output = Output::NotStarted;
                                 schedule(
                                     config.clone(),
