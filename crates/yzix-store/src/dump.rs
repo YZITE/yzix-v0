@@ -1,3 +1,7 @@
+// this crate only supports unix for now, and this ensures that the build fails
+// quickly, and the user isn't annoyed that it compiles, but doesn't work at runtime.
+#![cfg(unix)]
+
 use super::{Error, ErrorKind};
 use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
@@ -7,26 +11,24 @@ use std::{fs, path::Path};
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase", tag = "type")]
 pub enum Dump {
-    Regular {
-        executable: bool,
-        contents: Vec<u8>,
-    },
-    SymLink {
-        target: Utf8PathBuf,
-        /// marker, if the symlink points to a directory,
-        /// to correctly restore symlinks on windows
-        to_dir: bool,
-    },
+    Regular { executable: bool, contents: Vec<u8> },
+    SymLink { target: Utf8PathBuf },
     Directory(std::collections::BTreeMap<String, Dump>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Flags {
+    /// if `force` is `true`, then `write_to_path` will take additional
+    /// measures which will/might overwrite stuff.
+    ///
+    /// if `force` is `false`, then, if the object to dump already exists,
+    /// it aborts.
+    /// FIXME: make this an enum and make it possible to select a third kind
+    /// of behavoir: validation of an existing tree.
     pub force: bool,
     pub make_readonly: bool,
 }
 
-#[allow(unused_variables)]
 impl Dump {
     pub fn read_from_path(x: &Path) -> Result<Self, Error> {
         let mapef = |e: std::io::Error| Error {
@@ -43,22 +45,11 @@ impl Dump {
                     real_path: x.to_path_buf(),
                     kind: ErrorKind::NonUtf8SymlinkTarget,
                 })?;
-            let to_dir = std::fs::metadata(x)
-                .map(|y| y.file_type().is_dir())
-                .unwrap_or(false);
-            Dump::SymLink { target, to_dir }
+            Dump::SymLink { target }
         } else if ty.is_file() {
             Dump::Regular {
-                executable: {
-                    #[cfg(unix)]
-                    let y =
-                        std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o111 != 0;
-
-                    #[cfg(not(unix))]
-                    let y = false;
-
-                    y
-                },
+                executable: std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o111
+                    != 0,
                 contents: std::fs::read(x).map_err(&mapef)?,
             }
         } else if ty.is_dir() {
@@ -102,79 +93,37 @@ impl Dump {
         let mut skip_write = false;
 
         if let Ok(y) = fs::symlink_metadata(x) {
-            if !y.is_dir() {
-                if flags.force {
-                    let clrro = || {
-                        #[cfg(windows)]
-                        {
-                            // clear read-only attribute on windows, because
-                            // otherwise it would prevent deletion
-                            let mut perms = y.permissions();
-                            if perms.readonly() {
-                                perms.set_readonly(false);
-                                fs::set_permissions(x, perms).map_err(&mapef)?;
-                            }
-                        }
-                    };
-
-                    if let Dump::Regular {
-                        contents,
-                        executable,
-                    } = self
-                    {
-                        let cur_contents = fs::read(x).map_err(&mapef)?;
-                        if &cur_contents == contents {
-                            skip_write = true;
-                        } else {
-                            clrro();
-                            // omit file deletion here because
-                            // we overwrite it anyways
-                        }
-                    } else {
-                        clrro();
-                        fs::remove_file(x).map_err(&mapef)?;
-                    }
-                } else {
-                    return Err(Error {
-                        real_path: x.to_path_buf(),
-                        kind: ErrorKind::OverwriteDeclined,
-                    });
-                }
-            } else if let Dump::Directory(_) = self {
-                // passthrough
-            } else if flags.force {
-                fs::remove_dir_all(x).map_err(&mapef)?;
-            } else {
+            if !flags.force {
                 return Err(Error {
                     real_path: x.to_path_buf(),
                     kind: ErrorKind::OverwriteDeclined,
                 });
+            } else if !y.is_dir() {
+                if let Dump::Regular { contents, .. } = self {
+                    if fs::read(x)
+                        .map(|curcts| &curcts == contents)
+                        .unwrap_or(false)
+                    {
+                        skip_write = true;
+                    } else if y.file_type().is_symlink() {
+                        // FIXME: maybe keep existing symlinks if self is also a symlink,
+                        // and the target matches...
+                        fs::remove_file(x).map_err(&mapef)?;
+                    }
+                } else {
+                    fs::remove_file(x).map_err(&mapef)?;
+                }
+            } else if let Dump::Directory(_) = self {
+                // passthrough
+            } else {
+                // `x` is a directory and `self` isn't
+                fs::remove_dir_all(x).map_err(&mapef)?;
             }
         }
 
         match self {
-            Dump::SymLink { target, to_dir } => {
-                #[cfg(windows)]
-                {
-                    use std::os::windows::fs as wfs;
-                    if to_dir {
-                        wfs::symlink_dir(&target, x)
-                    } else {
-                        wfs::symlink_file(&target, x)
-                    }
-                    .map_err(&mapef)?;
-                }
-
-                #[cfg(unix)]
-                {
-                    std::os::unix::fs::symlink(&target, x).map_err(&mapef)?;
-                }
-
-                #[cfg(not(any(windows, unix)))]
-                return Err(Error {
-                    real_path: x.to_path_buf(),
-                    kind: ErrorKind::SymlinksUnsupported,
-                });
+            Dump::SymLink { target } => {
+                std::os::unix::fs::symlink(&target, x).map_err(&mapef)?;
             }
             Dump::Regular {
                 executable,
@@ -184,56 +133,46 @@ impl Dump {
                     fs::write(x, contents).map_err(&mapef)?;
                 }
 
-                #[cfg(windows)]
-                {
-                    let mut perms = fs::metadata(x).map_err(&mapef)?.permissions();
-                    if flags.make_readonly && !perms.readonly() {
-                        perms.set_readonly(true);
-                        fs::set_permissions(x, perms).map_err(&mapef)?;
-                    }
-                }
+                // don't make stuff readonly on windows, it makes overwriting files more complex...
 
-                #[cfg(unix)]
-                {
-                    if xattr::SUPPORTED_PLATFORM {
-                        // delete only non-system attributes for now
-                        // see also: https://github.com/NixOS/nix/pull/4765
-                        // e.g. we can't delete attributes like
-                        // - security.selinux
-                        // - system.nfs4_acl
-                        let rem_xattrs = xattr::list(x)
-                            .map_err(&mapef)?
-                            .flat_map(|i| i.into_string().ok())
-                            .filter(|i| !i.starts_with("security.") && !i.starts_with("system."))
-                            .collect::<Vec<_>>();
-                        if !rem_xattrs.is_empty() {
-                            // make the file temporary writable
-                            fs::set_permissions(
-                                x,
-                                std::os::unix::fs::PermissionsExt::from_mode(if *executable {
-                                    0o755
-                                } else {
-                                    0o644
-                                }),
-                            )
-                            .map_err(&mapef)?;
+                if xattr::SUPPORTED_PLATFORM {
+                    // delete only non-system attributes for now
+                    // see also: https://github.com/NixOS/nix/pull/4765
+                    // e.g. we can't delete attributes like
+                    // - security.selinux
+                    // - system.nfs4_acl
+                    let rem_xattrs = xattr::list(x)
+                        .map_err(&mapef)?
+                        .flat_map(|i| i.into_string().ok())
+                        .filter(|i| !i.starts_with("security.") && !i.starts_with("system."))
+                        .collect::<Vec<_>>();
+                    if !rem_xattrs.is_empty() {
+                        // make the file temporary writable
+                        fs::set_permissions(
+                            x,
+                            std::os::unix::fs::PermissionsExt::from_mode(if *executable {
+                                0o755
+                            } else {
+                                0o644
+                            }),
+                        )
+                        .map_err(&mapef)?;
 
-                            for i in rem_xattrs {
-                                xattr::remove(x, i).map_err(&mapef)?;
-                            }
+                        for i in rem_xattrs {
+                            xattr::remove(x, i).map_err(&mapef)?;
                         }
                     }
-
-                    let mut permbits = 0o444;
-                    if *executable {
-                        permbits |= 0o111;
-                    }
-                    if !flags.make_readonly {
-                        permbits |= 0o200;
-                    }
-                    fs::set_permissions(x, std::os::unix::fs::PermissionsExt::from_mode(permbits))
-                        .map_err(&mapef)?;
                 }
+
+                let mut permbits = 0o444;
+                if *executable {
+                    permbits |= 0o111;
+                }
+                if !flags.make_readonly {
+                    permbits |= 0o200;
+                }
+                fs::set_permissions(x, std::os::unix::fs::PermissionsExt::from_mode(permbits))
+                    .map_err(&mapef)?;
             }
             Dump::Directory(contents) => {
                 if let Err(e) = fs::create_dir(&x) {
@@ -260,7 +199,6 @@ impl Dump {
                                     });
                                 } else {
                                     if !already_writable {
-                                        #[cfg(unix)]
                                         fs::set_permissions(
                                             x,
                                             std::os::unix::fs::PermissionsExt::from_mode(0o755),
@@ -277,6 +215,16 @@ impl Dump {
                                 }
                             }
                         }
+
+                        if flags.force && !already_writable {
+                            fs::set_permissions(
+                                x,
+                                std::os::unix::fs::PermissionsExt::from_mode(0o755),
+                            )
+                            .map_err(&mapef)?;
+                        }
+                    } else {
+                        return Err(mapef(e));
                     }
                 }
                 let mut xs = x.to_path_buf();
@@ -294,7 +242,6 @@ impl Dump {
                 }
 
                 if flags.make_readonly {
-                    #[cfg(unix)]
                     fs::set_permissions(x, std::os::unix::fs::PermissionsExt::from_mode(0o555))
                         .map_err(&mapef)?;
                 }

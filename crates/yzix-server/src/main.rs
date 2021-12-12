@@ -599,15 +599,7 @@ async fn main() {
 
                                 if err_output.is_none() {
                                     let target = Utf8Path::new("..").join(outhash.to_string());
-                                    let to_dir = match &*dump {
-                                        Dump::Directory(_) => true,
-                                        Dump::Regular { .. } => false,
-                                        Dump::SymLink { to_dir, .. } => *to_dir,
-                                    };
-                                    syms.insert(
-                                        outname.clone().into(),
-                                        Dump::SymLink { target, to_dir },
-                                    );
+                                    syms.insert(outname.clone().into(), Dump::SymLink { target });
                                 }
                             }
                             if err_output.is_none() && !dstpath.exists() {
@@ -636,10 +628,9 @@ async fn main() {
                             // the 'out' (default output path) symlink
                             let symdump = if syms.len() == 1 {
                                 if let Some(sym) = syms.remove(&*OutputName::default()) {
-                                    if let Dump::SymLink { target, to_dir } = sym {
+                                    if let Dump::SymLink { target } = sym {
                                         Dump::SymLink {
                                             target: Utf8PathBuf::from(target.file_name().unwrap()),
-                                            to_dir,
                                         }
                                     } else {
                                         unreachable!("syms should only contain symlinks");
