@@ -129,14 +129,12 @@ impl BuiltItem {
 
 const INPUT_REALISATION_DIR_POSTFIX: &str = ".in2";
 
-type InHashExclusive = tokio::sync::Mutex<HashMap<StoreHash, HashSet<NodeIndex>>>;
+type InHashExclusive = HashMap<StoreHash, HashSet<NodeIndex>>;
 
 // if this returns true, continue, otherwise exit
-async fn inhxcl_setup(inhxcl: &InHashExclusive, inhash: StoreHash, nid: NodeIndex) -> bool {
+fn inhxcl_setup(inhxcl: &mut InHashExclusive, inhash: StoreHash, nid: NodeIndex) -> bool {
     let mut was_present = true;
     inhxcl
-        .lock()
-        .await
         .entry(inhash)
         .or_insert_with(|| {
             was_present = false;
@@ -150,7 +148,7 @@ async fn schedule(
     config: Arc<ServerConfig>,
     mains: Sender<MainMessage>,
     jobsem: Arc<tokio::sync::Semaphore>,
-    inhash_exclusive: Arc<tokio::sync::Mutex<HashMap<StoreHash, HashSet<NodeIndex>>>>,
+    inhash_exclusive: &mut InHashExclusive,
     connpool: Pool<FetchClient>,
     containerpool: Pool<String>,
     graph: &mut build_graph::Graph<NodeMeta>,
@@ -248,7 +246,7 @@ async fn schedule(
                     let jobsem = jobsem.clone();
                     let containerpool = containerpool.clone();
                     let mains = mains.clone();
-                    if inhxcl_setup(&inhash_exclusive, inhash, nid).await {
+                    if inhxcl_setup(inhash_exclusive, inhash, nid) {
                         tokio::spawn(async move {
                             let _job = jobsem.acquire().await;
                             let container_name = containerpool.pop().await;
@@ -420,10 +418,7 @@ async fn main() {
     // setup inhash-locking
     // stores an association between an `inhash`, and all scheduled jobs which correspond to it,
     // add themselves to it, to avoid multiple jobs with the same inhash running concurrently.
-    let inhash_exclusive = Arc::new(tokio::sync::Mutex::new(HashMap::<
-        StoreHash,
-        HashSet<NodeIndex>,
-    >::new()));
+    let mut inhash_exclusive = InHashExclusive::default();
 
     let listener = tokio::net::TcpListener::bind(&config.socket_bind)
         .await
@@ -552,7 +547,7 @@ async fn main() {
                         config.clone(),
                         mains.clone(),
                         jobsem.clone(),
-                        inhash_exclusive.clone(),
+                        &mut inhash_exclusive,
                         connpool.clone(),
                         containerpool.clone(),
                         &mut graph,
@@ -716,39 +711,36 @@ async fn main() {
                     }
                 }
 
-                let extra_affected_nids = {
-                    let mut l = inhash_exclusive.lock().await;
-                    if let Some(inhash) = maybe_inhash {
-                        if let Some(mut aff) = l.remove(&inhash) {
-                            let x = aff.remove(&nid);
-                            assert!(x);
-                            aff
-                        } else {
-                            // because a single nid should only ever be scheduled once
-                            // at a time, and no nid should be supplied to multiple entries
-                            // in the hashmap, we are done with checking here.
-                            HashSet::new()
-                        }
+                let extra_affected_nids = if let Some(inhash) = maybe_inhash {
+                    if let Some(mut aff) = inhash_exclusive.remove(&inhash) {
+                        let x = aff.remove(&nid);
+                        assert!(x);
+                        aff
                     } else {
-                        let mut affidx = HashSet::new();
-                        let mut inhashes = HashSet::new();
-                        l.retain(|k, v| {
-                            let reti = v.contains(&nid);
-                            if reti {
-                                affidx.extend(std::mem::take(v));
-                                inhashes.insert(k.to_string());
-                            }
-                            !reti
-                        });
-                        if inhashes.len() > 1 {
-                            for i in inhashes {
-                                yzix_core::tracing::warn!(inhash = %i, ?nid, "illegal inhash merge");
-                            }
-                            panic!("INTERNAL ERROR: node was scheduled via multiple inhashes");
-                        }
-                        affidx.remove(&nid);
-                        affidx
+                        // because a single nid should only ever be scheduled once
+                        // at a time, and no nid should be supplied to multiple entries
+                        // in the hashmap, we are done with checking here.
+                        HashSet::new()
                     }
+                } else {
+                    let mut affidx = HashSet::new();
+                    let mut inhashes = HashSet::new();
+                    inhash_exclusive.retain(|k, v| {
+                        let reti = v.contains(&nid);
+                        if reti {
+                            affidx.extend(std::mem::take(v));
+                            inhashes.insert(k.to_string());
+                        }
+                        !reti
+                    });
+                    if inhashes.len() > 1 {
+                        for i in inhashes {
+                            yzix_core::tracing::warn!(inhash = %i, ?nid, "illegal inhash merge");
+                        }
+                        panic!("INTERNAL ERROR: node was scheduled via multiple inhashes");
+                    }
+                    affidx.remove(&nid);
+                    affidx
                 };
 
                 {
@@ -785,7 +777,7 @@ async fn main() {
                                     config.clone(),
                                     mains.clone(),
                                     jobsem.clone(),
-                                    inhash_exclusive.clone(),
+                                    &mut inhash_exclusive,
                                     connpool.clone(),
                                     containerpool.clone(),
                                     &mut graph,
@@ -806,7 +798,7 @@ async fn main() {
                                 config.clone(),
                                 mains.clone(),
                                 jobsem.clone(),
-                                inhash_exclusive.clone(),
+                                &mut inhash_exclusive,
                                 connpool.clone(),
                                 containerpool.clone(),
                                 &mut graph,
