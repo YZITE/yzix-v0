@@ -29,11 +29,16 @@ pub async fn log_to_bunch<T: Clone>(subs: &mut Vec<Sender<T>>, msg: T) {
     });
 }
 
-pub async fn log_to_bunch_hm<T: Clone>(subs: &mut std::collections::HashMap<Arc<str>, Sender<T>>, msg: T) {
+pub async fn log_to_bunch_hm<T: Clone>(
+    subs: &mut std::collections::HashMap<Arc<str>, Sender<T>>,
+    msg: T,
+) {
     let mut hs = HashSet::new();
     {
-        let mut cont: futures_util::stream::FuturesOrdered<_> =
-            subs.iter().map(|(name, li)| li.send(msg.clone()).map(|suc| (Arc::clone(name), suc))).collect();
+        let mut cont: futures_util::stream::FuturesOrdered<_> = subs
+            .iter()
+            .map(|(name, li)| li.send(msg.clone()).map(|suc| (Arc::clone(name), suc)))
+            .collect();
         while let Some((name, suc)) = cont.next().await {
             if suc.is_ok() {
                 hs.insert(name);

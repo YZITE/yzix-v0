@@ -6,7 +6,7 @@
     unused_must_use
 )]
 
-use async_channel::{unbounded, bounded, Sender};
+use async_channel::{bounded, unbounded, Sender};
 use reqwest::Client as FetchClient;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -134,10 +134,15 @@ type InHashExclusive = tokio::sync::Mutex<HashMap<StoreHash, HashSet<NodeIndex>>
 // if this returns true, continue, otherwise exit
 async fn inhxcl_setup(inhxcl: &InHashExclusive, inhash: StoreHash, nid: NodeIndex) -> bool {
     let mut was_present = true;
-    inhxcl.lock().await.entry(inhash).or_insert_with(|| {
-        was_present = false;
-        HashSet::new()
-    }).insert(nid);
+    inhxcl
+        .lock()
+        .await
+        .entry(inhash)
+        .or_insert_with(|| {
+            was_present = false;
+            HashSet::new()
+        })
+        .insert(nid);
     !was_present
 }
 
@@ -346,11 +351,7 @@ async fn schedule(
                             let outhash = StoreHash::hash_complex::<Dump>(&*dump);
                             push_response(&mut graph.0[nid], ResponseKind::Dump(dump.clone()))
                                 .await;
-                            Ok(Some(BuiltItem::with_single(
-                                inhash,
-                                Some(dump),
-                                outhash,
-                            )))
+                            Ok(Some(BuiltItem::with_single(inhash, Some(dump), outhash)))
                         }
                         Err(e) => Err(e.into()),
                     }
@@ -419,7 +420,10 @@ async fn main() {
     // setup inhash-locking
     // stores an association between an `inhash`, and all scheduled jobs which correspond to it,
     // add themselves to it, to avoid multiple jobs with the same inhash running concurrently.
-    let inhash_exclusive = Arc::new(tokio::sync::Mutex::new(HashMap::<StoreHash, HashSet<NodeIndex>>::new()));
+    let inhash_exclusive = Arc::new(tokio::sync::Mutex::new(HashMap::<
+        StoreHash,
+        HashSet<NodeIndex>,
+    >::new()));
 
     let listener = tokio::net::TcpListener::bind(&config.socket_bind)
         .await
@@ -529,7 +533,7 @@ async fn main() {
                             let mut hm = HashMap::new();
                             hm.insert(bearer.clone(), logwbearer[&*bearer].clone());
                             hm
-                        },
+                        }
                         AttachLogsKind::Dup(log) => log,
                     };
                     graph.take_and_merge(
@@ -563,40 +567,12 @@ async fn main() {
                 let span =
                     span!(Level::INFO, "Done", ?nid, bldname = %node.name, tag = %node.logtag);
                 let _guard = span.enter();
-                let extra_affected_nids = {
-                    let mut l = inhash_exclusive.lock().await;
-                    if let Ok(Some(BuiltItem { inhash: Some(inhash), .. })) = det {
-                        if let Some(mut aff) = l.remove(&inhash) {
-                            let x = aff.remove(&nid);
-                            assert!(x);
-                            aff
-                        } else {
-                            // because a single nid should only ever be scheduled once
-                            // at a time, and no nid should be supplied to multiple entries
-                            // in the hashmap, we are done with checking here.
-                            HashSet::new()
-                        }
-                    } else {
-                        let mut affidx = HashSet::new();
-                        let mut inhashes = HashSet::new();
-                        l.retain(|k, v| {
-                            let reti = v.contains(&nid);
-                            if reti {
-                                affidx.extend(std::mem::take(v));
-                                inhashes.insert(k.to_string());
-                            }
-                            !reti
-                        });
-                        if inhashes.len() > 1 {
-                            for i in inhashes {
-                                yzix_core::tracing::warn!(inhash = %i, ?nid, "illegal inhash merge");
-                            }
-                            panic!("INTERNAL ERROR: node was scheduled via multiple inhashes");
-                        }
-                        affidx.remove(&nid);
-                        affidx
-                    }
+                let maybe_inhash = if let Ok(Some(BuiltItem { inhash, .. })) = det {
+                    inhash
+                } else {
+                    None
                 };
+
                 match det {
                     Ok(Some(BuiltItem { inhash, outputs })) => {
                         let mut success = true;
@@ -722,74 +698,12 @@ async fn main() {
                             }
                         }
 
-                        {
-                            let mut log = std::mem::take(&mut node.rest.log);
-                            for nid2 in extra_affected_nids {
-                                // FIXME: how to deal with logtags here?
-                                log.extend(std::mem::take(&mut graph.0[nid2].rest.log));
-                                graph.replace_node(nid2, nid);
-                            }
-                            graph.0[nid].rest.log = log;
-                        }
-
                         if success {
                             let realisation = outputs
                                 .iter()
                                 .map(|(name, &(_, outhash))| (name.clone(), outhash))
                                 .collect::<HashMap<OutputName, StoreHash>>();
-                            let mut node = &mut graph.0[nid];
-                            node.rest.output = Output::Success(realisation.clone());
-                            push_response(node, ResponseKind::OutputNotify(Ok(realisation))).await;
-
-                            // schedule now available jobs
-                            let outputs: HashSet<_> = outputs.into_iter().map(|(i, _)| i).collect();
-                            let reschedule_allowed = graph.0[nid].rest.reschedule;
-                            let mut reschedule = false;
-                            let mut per_nid_necouts = HashMap::<_, HashSet<_>>::new();
-                            for edge in graph.0.edges_directed(nid, Direction::Incoming) {
-                                per_nid_necouts
-                                    .entry(edge.source())
-                                    .or_default()
-                                    .insert(edge.weight().sel_output.clone());
-                            }
-                            for (nid2, necouts) in per_nid_necouts {
-                                if necouts.is_subset(&outputs) || !reschedule_allowed {
-                                    // if no reschedule is allowed,
-                                    // then this marks nid2 as failed
-                                    // (because the input is unavailable)
-                                    schedule(
-                                        config.clone(),
-                                        mains.clone(),
-                                        jobsem.clone(),
-                                        inhash_exclusive.clone(),
-                                        connpool.clone(),
-                                        containerpool.clone(),
-                                        &mut graph,
-                                        nid2,
-                                    )
-                                    .await;
-                                } else {
-                                    // this requires an output which is not yet available,
-                                    // e.g. because the input node was merged, and the
-                                    // nid2 was added to the main graph after scheduling
-                                    reschedule = true;
-                                }
-                            }
-                            if reschedule {
-                                assert!(reschedule_allowed);
-                                graph.0[nid].rest.output = Output::NotStarted;
-                                schedule(
-                                    config.clone(),
-                                    mains.clone(),
-                                    jobsem.clone(),
-                                    inhash_exclusive.clone(),
-                                    connpool.clone(),
-                                    containerpool.clone(),
-                                    &mut graph,
-                                    nid,
-                                )
-                                .await;
-                            }
+                            graph.0[nid].rest.output = Output::Success(realisation);
                         }
                     }
                     Ok(None) => {
@@ -801,6 +715,111 @@ async fn main() {
                         push_response(node, ResponseKind::OutputNotify(Err(oe))).await;
                     }
                 }
+
+                let extra_affected_nids = {
+                    let mut l = inhash_exclusive.lock().await;
+                    if let Some(inhash) = maybe_inhash {
+                        if let Some(mut aff) = l.remove(&inhash) {
+                            let x = aff.remove(&nid);
+                            assert!(x);
+                            aff
+                        } else {
+                            // because a single nid should only ever be scheduled once
+                            // at a time, and no nid should be supplied to multiple entries
+                            // in the hashmap, we are done with checking here.
+                            HashSet::new()
+                        }
+                    } else {
+                        let mut affidx = HashSet::new();
+                        let mut inhashes = HashSet::new();
+                        l.retain(|k, v| {
+                            let reti = v.contains(&nid);
+                            if reti {
+                                affidx.extend(std::mem::take(v));
+                                inhashes.insert(k.to_string());
+                            }
+                            !reti
+                        });
+                        if inhashes.len() > 1 {
+                            for i in inhashes {
+                                yzix_core::tracing::warn!(inhash = %i, ?nid, "illegal inhash merge");
+                            }
+                            panic!("INTERNAL ERROR: node was scheduled via multiple inhashes");
+                        }
+                        affidx.remove(&nid);
+                        affidx
+                    }
+                };
+
+                {
+                    let mut log = std::mem::take(&mut graph.0[nid].rest.log);
+                    for nid2 in extra_affected_nids {
+                        // FIXME: how to deal with logtags here?
+                        yzix_core::tracing::trace!("merge graph nodes {:?} <- {:?}", nid, nid2);
+                        log.extend(std::mem::take(&mut graph.0[nid2].rest.log));
+                        graph.replace_node(nid2, nid);
+                    }
+                    graph.0[nid].rest.log = log;
+                }
+
+                let result = match &graph.0[nid].rest.output {
+                    Output::Success(outputs) => {
+                        // schedule now available jobs
+                        let outputs_dup = outputs.clone();
+                        let outputs: HashSet<_> = outputs.iter().map(|(i, _)| i.clone()).collect();
+                        let reschedule_allowed = graph.0[nid].rest.reschedule;
+                        let mut reschedule = false;
+                        let mut per_nid_necouts = HashMap::<_, HashSet<_>>::new();
+                        for edge in graph.0.edges_directed(nid, Direction::Incoming) {
+                            per_nid_necouts
+                                .entry(edge.source())
+                                .or_default()
+                                .insert(edge.weight().sel_output.clone());
+                        }
+                        for (nid2, necouts) in per_nid_necouts {
+                            if necouts.is_subset(&outputs) || !reschedule_allowed {
+                                // if no reschedule is allowed,
+                                // then this marks nid2 as failed
+                                // (because the input is unavailable)
+                                schedule(
+                                    config.clone(),
+                                    mains.clone(),
+                                    jobsem.clone(),
+                                    inhash_exclusive.clone(),
+                                    connpool.clone(),
+                                    containerpool.clone(),
+                                    &mut graph,
+                                    nid2,
+                                )
+                                .await;
+                            } else {
+                                // this requires an output which is not yet available,
+                                // e.g. because the input node was merged, and the
+                                // nid2 was added to the main graph after scheduling
+                                reschedule = true;
+                            }
+                        }
+                        if reschedule {
+                            assert!(reschedule_allowed);
+                            graph.0[nid].rest.output = Output::NotStarted;
+                            schedule(
+                                config.clone(),
+                                mains.clone(),
+                                jobsem.clone(),
+                                inhash_exclusive.clone(),
+                                connpool.clone(),
+                                containerpool.clone(),
+                                &mut graph,
+                                nid,
+                            )
+                            .await;
+                        }
+                        Ok(outputs_dup)
+                    }
+                    Output::Failed(oe) => Err(oe.clone()),
+                    _ => unreachable!(),
+                };
+                push_response(&mut graph.0[nid], ResponseKind::OutputNotify(result)).await;
             }
         }
 
