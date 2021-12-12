@@ -532,12 +532,17 @@ async fn main() {
                 }
             }
             MM::Done { nid, det } => {
+                use yzix_core::tracing::{span, Level};
                 let mut node = &mut graph.0[nid];
+                let span = span!(Level::INFO, "Done", ?nid, bldname = %node.name, tag = %node.logtag);
+                let _guard = span.enter();
                 match det {
                     Ok(Some(BuiltItem { inhash, outputs })) => {
                         let mut success = true;
                         let mut syms = HashMap::new();
                         for (outname, (dump, outhash)) in &outputs {
+                            let span = span!(Level::ERROR, "output", %outhash);
+                            let _guard = span.enter();
                             let ohs = outhash.to_string();
                             let dstpath = config.store_path.join(&ohs).into_std_path_buf();
                             let mut err_output = None;
@@ -551,9 +556,9 @@ async fn main() {
                                                 let on_disk_hash =
                                                     StoreHash::hash_complex(&on_disk_dump);
                                                 if on_disk_hash != *outhash {
-                                                    error!(outhash = %outhash, "detected data corruption");
+                                                    error!("detected data corruption");
                                                 } else if on_disk_dump != *dump {
-                                                    error!(outhash = %outhash, "detected hash collision");
+                                                    error!("detected hash collision");
                                                     err_output = Some(OutputError::HashCollision(
                                                         on_disk_hash,
                                                     ));
@@ -563,7 +568,7 @@ async fn main() {
                                                 }
                                             }
                                             Err(e) => {
-                                                error!(outhash = %outhash, "while dumping: {}", e);
+                                                error!("while dumping: {}", e);
                                             }
                                         }
                                     } else {
@@ -615,6 +620,9 @@ async fn main() {
                             // this is caching, if it fails,
                             //    it's non-fatal for the node, but a big error for the server
 
+                            let span = span!(Level::ERROR, "realisation write", %inpath, ?syms);
+                            let _guard = span.enter();
+
                             let mut create_bunch = false;
                             if syms.len() == 1 {
                                 if let Some(target) = syms.remove(&*OutputName::default()) {
@@ -626,27 +634,14 @@ async fn main() {
                                                 &target,
                                                 inpath.as_std_path(),
                                             ) {
-                                                error!(
-                                                    %inpath,
-                                                    ?target,
-                                                    "realisation write (this breaks caching): {}", e
-                                                );
+                                                error!("{}", e);
                                             }
                                         }
                                         Ok(orig_target) => {
-                                            error!(
-                                                %inpath,
-                                                ?orig_target,
-                                                ?target,
-                                                "realisation write (this breaks caching): outname differs"
-                                            );
+                                            error!(?orig_target, "outname differs");
                                         }
                                         Err(e) => {
-                                            error!(
-                                                %inpath,
-                                                ?target,
-                                                "realisation write blocked (this breaks caching): {}", e
-                                            );
+                                            error!("blocked: {}", e);
                                         }
                                     }
                                     // usually, you can't mark a symlink read-only
@@ -661,12 +656,7 @@ async fn main() {
                                 if let Err(e) =
                                     create_in2_symlinks_bunch(inpath.as_std_path(), &syms)
                                 {
-                                    error!(
-                                        %inpath,
-                                        ?syms,
-                                        "realisation write ERROR (this breaks caching): {}",
-                                        e
-                                    );
+                                    error!("{}", e);
                                 }
                             }
                         }
@@ -732,13 +722,9 @@ async fn main() {
                         node.rest.output = Output::Success(HashMap::new());
                     }
                     Err(oe) => {
-                        let rk = ResponseKind::LogLine {
-                            bldname: node.name.clone(),
-                            content: format!("ERROR: {}", oe),
-                        };
-                        error!(bldname = %node.name, "{}", oe);
-                        node.rest.output = Output::Failed(oe);
-                        push_response(node, rk).await;
+                        error!("{}", oe);
+                        node.rest.output = Output::Failed(oe.clone());
+                        push_response(node, ResponseKind::OutputNotify(Err(oe))).await;
                     }
                 }
             }
