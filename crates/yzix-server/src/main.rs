@@ -253,8 +253,9 @@ async fn schedule(
                     });
                     return;
                 }
-                WI::UnDump { dat, hash } => {
-                    Ok(Some(BuiltItem::with_single(inhash, Some(dat), hash)))
+                WI::UnDump { dat } => {
+                    let outhash = StoreHash::hash_complex::<Dump>(&*dat);
+                    Ok(Some(BuiltItem::with_single(inhash, Some(dat), outhash)))
                 }
                 WI::Require(outhash) => Ok(Some(BuiltItem::with_single(None, None, outhash))),
                 WI::Fetch { url, expect_hash } => {
@@ -325,9 +326,8 @@ async fn schedule(
                         .collect()
                     {
                         Ok(dat) => {
-                            let dump = Dump::Directory(dat);
-                            let outhash = StoreHash::hash_complex(&dump);
-                            let dump = Arc::new(dump);
+                            let dump = Arc::new(Dump::Directory(dat));
+                            let outhash = StoreHash::hash_complex::<Dump>(&*dump);
                             push_response(&mut graph.0[nid], ResponseKind::Dump(dump.clone()))
                                 .await;
                             Ok(Some(BuiltItem::with_single(
@@ -557,7 +557,7 @@ async fn main() {
                                         match Dump::read_from_path(&dstpath) {
                                             Ok(on_disk_dump) => {
                                                 let on_disk_hash =
-                                                    StoreHash::hash_complex(&on_disk_dump);
+                                                    StoreHash::hash_complex::<Dump>(&on_disk_dump);
                                                 if on_disk_hash != *outhash {
                                                     error!("detected data corruption");
                                                 } else if on_disk_dump != *dump {

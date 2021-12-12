@@ -279,8 +279,8 @@ pub async fn handle_process(
                 .into_iter()
                 .map(|i| {
                     tokio::task::block_in_place(|| {
-                        let dump = Dump::read_from_path(&rootdir.join("out"))?;
-                        let outhash = StoreHash::hash_complex(&dump);
+                        let dump = Dump::read_from_path(&rootdir.join(&*i))?;
+                        let outhash = StoreHash::hash_complex::<Dump>(&dump);
                         Ok::<_, yzix_core::store::Error>((
                             i,
                             (Some(std::sync::Arc::new(dump)), outhash),

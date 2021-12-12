@@ -137,11 +137,12 @@ fn main() {
         let startval = 0xbeef;
 
         for (tag, i) in scmd.values_of("SOURCES").unwrap().enumerate() {
+            use yzix_core::store::Dump;
             let logtag = (startval + tag).try_into().unwrap();
             let p = std::path::Path::new(i);
-            let dump = yzix_core::store::Dump::read_from_path(p)
+            let dump = Dump::read_from_path(p)
                 .unwrap_or_else(|e| panic!("{}: unable to read source: {}", i, e));
-            let dumphash = yzix_core::store::Hash::hash_complex(&dump);
+            let dumphash = yzix_core::store::Hash::hash_complex::<Dump>(&dump);
             println!("{} {} {:?}", logtag, dumphash, dumphash.0);
             graph.0.add_node(bg::Node {
                 name: p.file_name().unwrap().to_str().unwrap().to_string(),
