@@ -138,7 +138,7 @@ impl<T> Node<T> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Deserialize, Serialize)]
 pub struct Edge {
     pub kind: EdgeKind,
 
@@ -150,7 +150,7 @@ pub struct Edge {
     pub sel_output: OutputName,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Deserialize, Serialize)]
 pub enum EdgeKind {
     Placeholder(String),
 
@@ -175,7 +175,8 @@ impl<T> Graph<T> {
     /// used e.g. to merge identical nodes
     pub fn replace_node(&mut self, from: NodeIndex, to: NodeIndex) -> Option<Node<T>> {
         // ignore input edges, transfer output edges
-        let mut oedges: HashMap<_, _> = self
+        // NOTE: we may have multiple edges between the same two nodes.
+        let mut oedges: HashSet<_> = self
             .0
             .edges_directed(from, Direction::Incoming)
             .map(|i| (i.target(), i.id()))
@@ -189,22 +190,12 @@ impl<T> Graph<T> {
         let ret = self.0.remove_node(from)?;
         // prune unnecessary edges
         for i in self.0.edges_directed(to, Direction::Incoming) {
-            if let Some(x) = oedges.remove(&i.source()) {
-                if &x == i.weight() {
-                    // edge identical, drop it
-                    continue;
-                }
-                // ignore it
-                // TODO: insert some logging here
-                continue;
-            }
+            oedges.remove(&(i.source(), i.weight().clone()));
         }
         // transfer remaining edges
         for (trg, e) in oedges {
             self.0.add_edge(trg, to, e);
         }
-        // do not reset input hash cache, it only depends on the inputs,
-        // which we just leave as-is
         Some(ret)
     }
 
@@ -249,11 +240,12 @@ impl<T> Graph<T> {
                 // contains outgoing half-edges
                 let res_inps = rhs.0.edges(i);
                 let res_inps_cnt = res_inps.clone().count();
+                // outgoing edge weights must be unique per node
                 let res_inps: HashMap<_, _> = res_inps
-                    .flat_map(|ie| ret.get(&ie.target()).map(|&x| (x, ie.weight())))
+                    .flat_map(|ie| ret.get(&ie.target()).map(|&x| (ie.weight(), x)))
                     .collect();
                 if res_inps.len() != res_inps_cnt {
-                    // contains unresolved inputs
+                    // contains unresolved inputs or dup edge-weights
                     continue;
                 }
 
@@ -267,7 +259,7 @@ impl<T> Graph<T> {
                         && self
                             .0
                             .edges(j)
-                            .map(|je| (je.target(), je.weight()))
+                            .map(|je| (je.weight(), je.target()))
                             .collect::<HashMap<_, _>>()
                             == res_inps
                     {
@@ -283,7 +275,7 @@ impl<T> Graph<T> {
                 ret.insert(i, j);
 
                 // copy outgoing edges
-                for (src, wei) in res_inps {
+                for (wei, src) in res_inps {
                     self.0.add_edge(j, src, wei.clone());
                 }
             }

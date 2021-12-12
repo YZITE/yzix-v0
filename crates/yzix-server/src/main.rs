@@ -53,7 +53,7 @@ pub enum LogFwdMessage {
 #[derive(Debug)]
 pub struct NodeMeta {
     output: Output,
-    log: Vec<Sender<LogFwdMessage>>,
+    log: HashMap<Arc<str>, Sender<LogFwdMessage>>,
     reschedule: bool,
 }
 
@@ -61,7 +61,7 @@ impl Default for NodeMeta {
     fn default() -> Self {
         Self {
             output: Output::NotStarted,
-            log: vec![],
+            log: Default::default(),
             reschedule: false,
         }
     }
@@ -97,7 +97,7 @@ pub enum AttachLogsKind {
     // attach logs via bearer
     Bearer(Arc<str>),
     // dup existing logs
-    Dup(Vec<Sender<LogFwdMessage>>),
+    Dup(HashMap<Arc<str>, Sender<LogFwdMessage>>),
 }
 
 // this structure is used to avoid switching up argument order
@@ -129,10 +129,23 @@ impl BuiltItem {
 
 const INPUT_REALISATION_DIR_POSTFIX: &str = ".in2";
 
+type InHashExclusive = tokio::sync::Mutex<HashMap<StoreHash, HashSet<NodeIndex>>>;
+
+// if this returns true, continue, otherwise exit
+async fn inhxcl_setup(inhxcl: &InHashExclusive, inhash: StoreHash, nid: NodeIndex) -> bool {
+    let mut was_present = true;
+    inhxcl.lock().await.entry(inhash).or_insert_with(|| {
+        was_present = false;
+        HashSet::new()
+    }).insert(nid);
+    !was_present
+}
+
 async fn schedule(
     config: Arc<ServerConfig>,
     mains: Sender<MainMessage>,
     jobsem: Arc<tokio::sync::Semaphore>,
+    inhash_exclusive: Arc<tokio::sync::Mutex<HashMap<StoreHash, HashSet<NodeIndex>>>>,
     connpool: Pool<FetchClient>,
     containerpool: Pool<String>,
     graph: &mut build_graph::Graph<NodeMeta>,
@@ -225,32 +238,35 @@ async fn schedule(
                     outputs,
                     uses_placeholders,
                 } => {
+                    let inhash = inhash.unwrap();
                     let config = config.clone();
                     let jobsem = jobsem.clone();
                     let containerpool = containerpool.clone();
                     let mains = mains.clone();
-                    tokio::spawn(async move {
-                        let _job = jobsem.acquire().await;
-                        let container_name = containerpool.pop().await;
-                        let det = handle_process(
-                            &config,
-                            &container_name,
-                            WorkItemRun {
-                                inhash: inhash.unwrap(),
-                                args,
-                                envs,
-                                new_root,
-                                outputs,
-                                need_store_mount: uses_placeholders,
-                            },
-                        )
-                        .await
-                        .map(Some);
-                        let _ = tokio::join!(
-                            containerpool.push(container_name),
-                            mains.send(MainMessage::Done { nid, det }),
-                        );
-                    });
+                    if inhxcl_setup(&inhash_exclusive, inhash, nid).await {
+                        tokio::spawn(async move {
+                            let _job = jobsem.acquire().await;
+                            let container_name = containerpool.pop().await;
+                            let det = handle_process(
+                                &config,
+                                &container_name,
+                                WorkItemRun {
+                                    inhash,
+                                    args,
+                                    envs,
+                                    new_root,
+                                    outputs,
+                                    need_store_mount: uses_placeholders,
+                                },
+                            )
+                            .await
+                            .map(Some);
+                            let _ = tokio::join!(
+                                containerpool.push(container_name),
+                                mains.send(MainMessage::Done { nid, det }),
+                            );
+                        });
+                    }
                     return;
                 }
                 WI::UnDump { dat } => {
@@ -400,6 +416,15 @@ async fn main() {
     let cpucnt = num_cpus::get();
     let jobsem = Arc::new(tokio::sync::Semaphore::new(cpucnt));
 
+    // setup inhash-locking
+    // stores an association between an `inhash`, and all scheduled jobs which correspond to it,
+    // add themselves to it, to avoid multiple jobs with the same inhash running concurrently.
+    let inhash_exclusive = Arc::new(tokio::sync::Mutex::new(HashMap::<StoreHash, HashSet<NodeIndex>>::new()));
+
+    let listener = tokio::net::TcpListener::bind(&config.socket_bind)
+        .await
+        .unwrap();
+
     // setup pools
     let connpool = Pool::<FetchClient>::default();
     let containerpool = Pool::<String>::default();
@@ -421,10 +446,6 @@ async fn main() {
             tokio::join!(a, b);
         }
     }
-
-    let listener = tokio::net::TcpListener::bind(&config.socket_bind)
-        .await
-        .unwrap();
 
     // we don't need workers. we just spawn tasks instead
     // this means that it is impossible to fix or modify
@@ -505,8 +526,10 @@ async fn main() {
                 let trt = if let Some(attach_logs) = attach_logs {
                     let log = match attach_logs {
                         AttachLogsKind::Bearer(bearer) => {
-                            vec![logwbearer[&*bearer].clone()]
-                        }
+                            let mut hm = HashMap::new();
+                            hm.insert(bearer.clone(), logwbearer[&*bearer].clone());
+                            hm
+                        },
                         AttachLogsKind::Dup(log) => log,
                     };
                     graph.take_and_merge(
@@ -525,6 +548,7 @@ async fn main() {
                         config.clone(),
                         mains.clone(),
                         jobsem.clone(),
+                        inhash_exclusive.clone(),
                         connpool.clone(),
                         containerpool.clone(),
                         &mut graph,
@@ -539,6 +563,40 @@ async fn main() {
                 let span =
                     span!(Level::INFO, "Done", ?nid, bldname = %node.name, tag = %node.logtag);
                 let _guard = span.enter();
+                let extra_affected_nids = {
+                    let mut l = inhash_exclusive.lock().await;
+                    if let Ok(Some(BuiltItem { inhash: Some(inhash), .. })) = det {
+                        if let Some(mut aff) = l.remove(&inhash) {
+                            let x = aff.remove(&nid);
+                            assert!(x);
+                            aff
+                        } else {
+                            // because a single nid should only ever be scheduled once
+                            // at a time, and no nid should be supplied to multiple entries
+                            // in the hashmap, we are done with checking here.
+                            HashSet::new()
+                        }
+                    } else {
+                        let mut affidx = HashSet::new();
+                        let mut inhashes = HashSet::new();
+                        l.retain(|k, v| {
+                            let reti = v.contains(&nid);
+                            if reti {
+                                affidx.extend(std::mem::take(v));
+                                inhashes.insert(k.to_string());
+                            }
+                            !reti
+                        });
+                        if inhashes.len() > 1 {
+                            for i in inhashes {
+                                yzix_core::tracing::warn!(inhash = %i, ?nid, "illegal inhash merge");
+                            }
+                            panic!("INTERNAL ERROR: node was scheduled via multiple inhashes");
+                        }
+                        affidx.remove(&nid);
+                        affidx
+                    }
+                };
                 match det {
                     Ok(Some(BuiltItem { inhash, outputs })) => {
                         let mut success = true;
@@ -664,11 +722,22 @@ async fn main() {
                             }
                         }
 
+                        {
+                            let mut log = std::mem::take(&mut node.rest.log);
+                            for nid2 in extra_affected_nids {
+                                // FIXME: how to deal with logtags here?
+                                log.extend(std::mem::take(&mut graph.0[nid2].rest.log));
+                                graph.replace_node(nid2, nid);
+                            }
+                            graph.0[nid].rest.log = log;
+                        }
+
                         if success {
                             let realisation = outputs
                                 .iter()
                                 .map(|(name, &(_, outhash))| (name.clone(), outhash))
                                 .collect::<HashMap<OutputName, StoreHash>>();
+                            let mut node = &mut graph.0[nid];
                             node.rest.output = Output::Success(realisation.clone());
                             push_response(node, ResponseKind::OutputNotify(Ok(realisation))).await;
 
@@ -692,6 +761,7 @@ async fn main() {
                                         config.clone(),
                                         mains.clone(),
                                         jobsem.clone(),
+                                        inhash_exclusive.clone(),
                                         connpool.clone(),
                                         containerpool.clone(),
                                         &mut graph,
@@ -712,6 +782,7 @@ async fn main() {
                                     config.clone(),
                                     mains.clone(),
                                     jobsem.clone(),
+                                    inhash_exclusive.clone(),
                                     connpool.clone(),
                                     containerpool.clone(),
                                     &mut graph,

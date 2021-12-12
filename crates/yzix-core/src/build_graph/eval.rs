@@ -52,8 +52,6 @@ pub enum WorkItem {
     },
     UnDump {
         dat: Arc<Dump>,
-        /// invariant: `StoreHash.hash_complex(&*dat) == hash`
-        hash: StoreHash,
     },
     Require(StoreHash),
     Fetch {
@@ -68,6 +66,7 @@ pub enum WorkItem {
 }
 
 impl WorkItem {
+    #[inline]
     pub fn inputs_hash(&self) -> Option<StoreHash> {
         use WorkItem as WI;
         match self {
@@ -75,8 +74,8 @@ impl WorkItem {
             // e.g. used to reduce the size of the transferred graph from client to server,
             // and because they are shortcuts, they are fast to check/execute on the server
             // so we don't want to check input-addressing for them.
-            WI::Require(_) | WI::Eval(_) | WI::Dump { .. } => None,
-            _ => Some(StoreHash::hash_complex(self)),
+            WI::Require(_) | WI::Eval(_) | WI::Dump { .. } | WI::UnDump { .. } => None,
+            _ => Some(StoreHash::hash_complex::<Self>(self)),
         }
     }
 
@@ -84,8 +83,8 @@ impl WorkItem {
         use WorkItem as WI;
         match self {
             WI::Fetch { expect_hash, .. } => expect_hash.as_ref().copied(),
-            WI::UnDump { hash, .. } | WI::Require(hash) => Some(*hash),
-            WI::Run { .. } | WI::Dump { .. } | WI::Eval(_) | WI::VerificationOk => None,
+            WI::Require(hash) => Some(*hash),
+            _ => None,
         }
     }
 }
@@ -195,13 +194,7 @@ impl<T: ReadOutHash> Graph<T> {
                     uses_placeholders,
                 }
             }
-            NK::UnDump { dat } => {
-                let hash = StoreHash::hash_complex(&*dat);
-                WorkItem::UnDump {
-                    dat: dat.clone(),
-                    hash,
-                }
-            }
+            NK::UnDump { dat } => WorkItem::UnDump { dat: dat.clone() },
             NK::Require { hash } => WorkItem::Require(*hash),
             NK::Dump => WorkItem::Dump(rphs),
 

@@ -31,6 +31,7 @@ static B64_ENGINE: Lazy<FastPortable> = Lazy::new(|| {
 });
 
 impl fmt::Display for Hash {
+    #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&base64::encode_engine(self.0, &*B64_ENGINE))
     }
@@ -38,6 +39,7 @@ impl fmt::Display for Hash {
 
 impl std::str::FromStr for Hash {
     type Err = base64::DecodeError;
+    #[inline]
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(Self(
             base64::decode_engine(s, &*B64_ENGINE)?
@@ -61,6 +63,7 @@ impl Hash {
         blake2::VarBlake2b::new(HASH_LEN).unwrap()
     }
 
+    #[inline]
     pub fn finalize_hasher(x: blake2::VarBlake2b) -> Self {
         use blake2::digest::VariableOutput;
         let mut hash = Self([0u8; HASH_LEN]);
@@ -68,11 +71,14 @@ impl Hash {
         hash
     }
 
+    /// NOTE: it is recommended to always specify the type paramter when calling
+    /// this function to prevent accidential hash changes
+    /// (e.g. forgot to deref or such)
     pub fn hash_complex<T: serde::Serialize>(x: &T) -> Self {
-        use blake2::digest::Update;
-        let mut hasher = Self::get_hasher();
         let mut ser = Vec::new();
         ciborium::ser::into_writer(x, &mut ser).unwrap();
+        use blake2::digest::Update;
+        let mut hasher = Self::get_hasher();
         hasher.update(ser);
         Self::finalize_hasher(hasher)
     }
@@ -114,6 +120,7 @@ pub enum ErrorKind {
 }
 
 impl From<std::io::Error> for ErrorKind {
+    #[inline]
     fn from(e: std::io::Error) -> ErrorKind {
         ErrorKind::IoMisc {
             errno: e.raw_os_error(),
