@@ -1,7 +1,7 @@
 use crate::{BuiltItem, LogFwdMessage, NodeMeta, WorkItemRun};
 use async_channel::{Receiver, Sender};
 use futures_util::{FutureExt, StreamExt};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::{future::Future, marker::Unpin, path::Path, sync::Arc};
 use yzix_core::build_graph;
 use yzix_core::store::{Dump, Hash as StoreHash};
@@ -219,13 +219,18 @@ pub fn random_name() -> String {
         .collect::<String>()
 }
 
+fn dfl_env_var(envs: &mut HashMap<String, String>, key: &str, value: &str) {
+    envs.entry(key.to_string())
+        .or_insert_with(|| value.to_string());
+}
+
 pub async fn handle_process(
     config: &crate::ServerConfig,
     container_name: &str,
     WorkItemRun {
         inhash,
         args,
-        envs,
+        mut envs,
         new_root,
         outputs,
         need_store_mount,
@@ -235,7 +240,7 @@ pub async fn handle_process(
     let rootdir = workdir.path().join("rootfs");
     let logoutput = config.store_path.join(format!("{}.log.zst", inhash));
 
-    let extra_env = if let Some(new_root) = new_root {
+    if let Some(new_root) = new_root {
         tokio::task::block_in_place(|| {
             // to work-around read-only stuff and such, copy the tree...
             let rootfs = config.store_path.join(new_root.to_string());
@@ -251,12 +256,15 @@ pub async fn handle_process(
             let mut perms = std::fs::metadata(&rootdir)?.permissions();
             perms.set_readonly(false);
             std::fs::set_permissions(&rootdir, perms)?;
-            Ok::<_, OutputError>(Some(format!("ROOTFS={}", rootfs)))
-        })?
+            envs.insert("ROOTFS".to_string(), rootfs.to_string());
+            Ok::<_, OutputError>(())
+        })?;
     } else {
         std::fs::create_dir_all(&rootdir)?;
-        None
-    };
+    }
+
+    dfl_env_var(&mut envs, "LC_ALL", "C.UTF-8");
+    dfl_env_var(&mut envs, "TZ", "UTC");
 
     // generate spec
     write_linux_ocirt_spec(
@@ -265,7 +273,6 @@ pub async fn handle_process(
         args,
         envs.into_iter()
             .map(|(i, j)| format!("{}={}", i, j))
-            .chain(extra_env)
             .collect(),
         &workdir.path().join("config.json"),
         need_store_mount,

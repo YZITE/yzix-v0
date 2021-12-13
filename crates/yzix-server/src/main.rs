@@ -394,8 +394,15 @@ async fn schedule(
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
-    // set the time zone to avoid funky locale stuff
-    std::env::set_var("TZ", "UTC");
+    // reset all environment variables before invoking any .await
+    {
+        use std::env;
+        for (key, _) in env::vars_os() {
+            env::remove_var(key);
+        }
+        env::set_var("LC_ALL", "C.UTF-8");
+        env::set_var("TZ", "UTC");
+    }
 
     let config: ServerConfig = {
         let mut args = std::env::args().skip(1);
