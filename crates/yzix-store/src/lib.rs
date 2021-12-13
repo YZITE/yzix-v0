@@ -1,4 +1,5 @@
 use base64::engine::fast_portable::{FastPortable, FastPortableConfig};
+use blake2::{Blake2b, Digest, digest::consts::U32};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::{convert, fmt};
@@ -7,12 +8,8 @@ mod dump;
 // TODO: maybe rename Flags to something better...
 pub use dump::{Dump, Flags};
 
-// we can't use > 32 because serde (1.0.130) doesn't derive
-// Deserialize... etc. for array lengths > 32.
-const HASH_LEN: usize = 32;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
-pub struct Hash(pub [u8; HASH_LEN]);
+pub struct Hash(pub [u8; 32]);
 
 static B64_ALPHABET: Lazy<base64::alphabet::Alphabet> = Lazy::new(|| {
     // base64, like URL_SAFE, but '-' is replaced with '+' for better interaction
@@ -58,17 +55,13 @@ impl convert::AsRef<[u8]> for Hash {
 
 impl Hash {
     #[inline]
-    pub fn get_hasher() -> blake2::Blake2bVar {
-        use blake2::digest::VariableOutput;
-        blake2::Blake2bVar::new(HASH_LEN).unwrap()
+    pub fn get_hasher() -> Blake2b<U32> {
+        Blake2b::new()
     }
 
     #[inline]
-    pub fn finalize_hasher(x: blake2::Blake2bVar) -> Self {
-        use blake2::digest::VariableOutput;
-        let mut hash = Self([0u8; HASH_LEN]);
-        x.finalize_variable(&mut hash.0).unwrap();
-        hash
+    pub fn finalize_hasher(x: Blake2b<U32>) -> Self {
+        Self(x.finalize().try_into().unwrap())
     }
 
     /// NOTE: it is recommended to always specify the type paramter when calling
@@ -77,7 +70,6 @@ impl Hash {
     pub fn hash_complex<T: serde::Serialize>(x: &T) -> Self {
         let mut ser = Vec::new();
         ciborium::ser::into_writer(x, &mut ser).unwrap();
-        use blake2::digest::Update;
         let mut hasher = Self::get_hasher();
         hasher.update(&ser[..]);
         Self::finalize_hasher(hasher)
