@@ -32,3 +32,8 @@ xattr = "0.2"
 
 [dev-dependencies]
 serde_test = "1.0"
+
+[dev-dependencies.proptest]
+version = "1.0"
+default-features = false
+features = ["std"]

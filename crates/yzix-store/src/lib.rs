@@ -201,4 +201,12 @@ mod tests {
             &[Token::Str("m84OFxOfkVnnF7om15va9o1mgFcWD1TGH26ZhTLPuyg")],
         );
     }
+
+    proptest::proptest! {
+        #[test]
+        fn hash_roundtrip(s: [u8; 32]) {
+            let x = Hash(s);
+            proptest::prop_assert_eq!(Ok(x), x.to_string().parse());
+        }
+    }
 }
