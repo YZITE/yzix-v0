@@ -58,16 +58,16 @@ impl convert::AsRef<[u8]> for Hash {
 
 impl Hash {
     #[inline]
-    pub fn get_hasher() -> blake2::VarBlake2b {
+    pub fn get_hasher() -> blake2::Blake2bVar {
         use blake2::digest::VariableOutput;
-        blake2::VarBlake2b::new(HASH_LEN).unwrap()
+        blake2::Blake2bVar::new(HASH_LEN).unwrap()
     }
 
     #[inline]
-    pub fn finalize_hasher(x: blake2::VarBlake2b) -> Self {
+    pub fn finalize_hasher(x: blake2::Blake2bVar) -> Self {
         use blake2::digest::VariableOutput;
         let mut hash = Self([0u8; HASH_LEN]);
-        x.finalize_variable(|res| hash.0.copy_from_slice(res));
+        x.finalize_variable(&mut hash.0).unwrap();
         hash
     }
 
@@ -79,7 +79,7 @@ impl Hash {
         ciborium::ser::into_writer(x, &mut ser).unwrap();
         use blake2::digest::Update;
         let mut hasher = Self::get_hasher();
-        hasher.update(ser);
+        hasher.update(&ser[..]);
         Self::finalize_hasher(hasher)
     }
 }

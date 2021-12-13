@@ -16,13 +16,11 @@ tempfile = "3.2"
 thiserror = "1.0"
 toml = "0.5"
 tracing-subscriber = "0.3"
+futures-util= "0.3"
 
 [dependencies.async-compression]
 version = "0.3"
 features = ["tokio", "zstd"]
-
-[dependencies.futures-util]
-version = "0.3"
 
 [dependencies.reqwest]
 version = "0.11"
