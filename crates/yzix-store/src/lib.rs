@@ -11,7 +11,7 @@ pub use dump::{Dump, Flags};
 // Deserialize... etc. for array lengths > 32.
 const HASH_LEN: usize = 32;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct Hash(pub [u8; HASH_LEN]);
 
 static B64_ALPHABET: Lazy<base64::alphabet::Alphabet> = Lazy::new(|| {
@@ -84,6 +84,52 @@ impl Hash {
     }
 }
 
+impl<'de> serde::Deserialize<'de> for Hash {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use std::marker::PhantomData;
+        struct Visitor<'de>(PhantomData<&'de ()>);
+        impl<'de> serde::de::Visitor<'de> for Visitor<'de> {
+            type Value = Hash;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                fmt::Formatter::write_str(f, "tuple struct Hash")
+            }
+            #[inline]
+            fn visit_newtype_struct<E>(self, e: E) -> Result<Self::Value, E::Error>
+            where
+                E: serde::Deserializer<'de>,
+            {
+                serde::Deserialize::deserialize(e).map(Hash)
+            }
+            #[inline]
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                serde::de::SeqAccess::next_element(&mut seq)?
+                    .ok_or_else(|| {
+                        serde::de::Error::invalid_length(
+                            0usize,
+                            &"tuple struct Hash with 1 element",
+                        )
+                    })
+                    .map(Hash)
+            }
+            // additional method, not derived normally
+            #[inline]
+            fn visit_str<E>(self, s: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                core::str::FromStr::from_str(s).map_err(serde::de::Error::custom)
+            }
+        }
+        serde::Deserializer::deserialize_newtype_struct(deserializer, "Hash", Visitor(PhantomData))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, thiserror::Error)]
 #[error("{real_path}: {kind}")]
 pub struct Error {
@@ -126,5 +172,33 @@ impl From<std::io::Error> for ErrorKind {
             errno: e.raw_os_error(),
             desc: e.to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Hash;
+
+    #[test]
+    fn hash_parse() {
+        assert_eq!(
+            "m84OFxOfkVnnF7om15va9o1mgFcWD1TGH26ZhTLPuyg".parse(),
+            Ok(Hash([
+                155, 206, 14, 23, 19, 159, 145, 89, 231, 23, 186, 38, 215, 155, 218, 246, 141, 102,
+                128, 87, 22, 15, 84, 198, 31, 110, 153, 133, 50, 207, 187, 40
+            ]))
+        );
+    }
+
+    #[test]
+    fn hash_deser_from_str() {
+        use serde_test::Token;
+        serde_test::assert_de_tokens(
+            &Hash([
+                155, 206, 14, 23, 19, 159, 145, 89, 231, 23, 186, 38, 215, 155, 218, 246, 141, 102,
+                128, 87, 22, 15, 84, 198, 31, 110, 153, 133, 50, 207, 187, 40,
+            ]),
+            &[Token::Str("m84OFxOfkVnnF7om15va9o1mgFcWD1TGH26ZhTLPuyg")],
+        );
     }
 }

@@ -29,3 +29,6 @@ features = ["derive", "std"]
 
 [target.'cfg(unix)'.dependencies]
 xattr = "0.2"
+
+[dev-dependencies]
+serde_test = "1.0"
