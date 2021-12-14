@@ -5,14 +5,11 @@ edition = "2021"
 license = "Apache-2.0 WITH LLVM-exception"
 
 [dependencies]
+base64 = "0.20.0-alpha.1"
 blake2 = "0.10"
 filetime = "0.2"
 once_cell = "1.8"
 thiserror = "1.0"
-
-[dependencies.base64]
-git = "https://github.com/marshallpierce/rust-base64.git"
-branch = "master"
 
 [dependencies.camino]
 version = "1.0"
